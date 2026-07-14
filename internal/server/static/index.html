@@ -59,6 +59,16 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
 .ts-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .ts-btn{background:#1e2235;border:1px solid #2d3148;color:#94a3b8;border-radius:6px;padding:5px 12px;font-size:.78rem;cursor:pointer;transition:all .15s}
 .ts-btn:hover,.ts-btn.selected{border-color:#a78bfa;color:#a78bfa;background:#1a1428}
+/* student checkbox list */
+.student-list{max-height:160px;overflow-y:auto;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:6px 10px;margin-top:6px;display:flex;flex-direction:column;gap:4px}
+.student-list label{display:flex;align-items:center;gap:8px;font-size:.82rem;color:#cbd5e1;cursor:pointer;padding:3px 4px;border-radius:4px;transition:background .1s}
+.student-list label:hover{background:#1e2235}
+.student-list input[type=checkbox]{width:14px;height:14px;accent-color:#7c3aed;cursor:pointer;flex-shrink:0}
+.student-toggle-row{display:flex;gap:10px;margin-top:6px}
+.student-toggle-row button{font-size:.75rem;padding:3px 10px}
+/* saved rules pill */
+.rules-saved{display:inline-flex;align-items:center;gap:6px;margin-top:6px;padding:4px 10px;background:#1a1428;border:1px solid #a78bfa44;border-radius:20px;font-size:.75rem;color:#c4b5fd}
+.rules-saved .clear-btn{background:none;border:none;color:#f87171;cursor:pointer;padding:0 2px;font-size:.85rem;line-height:1}
 .auth-card {
   background: rgba(30, 41, 59, 0.7);
   backdrop-filter: blur(12px);
@@ -157,16 +167,21 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
       <input type="file" id="f-solution"/>
     </div>
     <div class="field">
-      <label>Grading rules file <span class="badge">optional</span></label>
-      <input type="file" id="f-rules"/>
-      <div class="hint">Leave empty to use workspace prompts/grader.md</div>
+      <label>Grading rules file</label>
+      <input type="file" id="f-rules" onchange="onRulesFileChange('f')"/>
+      <div id="f-rules-saved" style="display:none"></div>
     </div>
   </div>
-  <div class="row">
+  <div style="margin-top:16px">
     <div class="field">
-      <label>Students filter <span class="badge">optional</span></label>
-      <input type="text" id="f-students" placeholder="Іванов, Петренко"/>
-      <div class="hint">Comma-separated surnames. Leave empty to grade all.</div>
+      <label>Students <span class="badge">check all to grade everyone</span></label>
+      <div class="student-toggle-row">
+        <button class="secondary" onclick="toggleAllStudents('f', true)">Select all</button>
+        <button class="secondary" onclick="toggleAllStudents('f', false)">Select none</button>
+      </div>
+      <div class="student-list" id="f-students-list">
+        <span style="color:#475569;font-size:.8rem">Pick a course to load students…</span>
+      </div>
     </div>
   </div>
   <div class="action-row">
@@ -207,15 +222,16 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
       <input type="file" id="r-solution"/>
     </div>
     <div class="field">
-      <label>Grading rules file <span class="badge">optional</span></label>
-      <input type="file" id="r-rules"/>
-      <div class="hint">Leave empty to use workspace prompts/grader.md</div>
+      <label>Grading rules file</label>
+      <input type="file" id="r-rules" onchange="onRulesFileChange('r')"/>
+      <div id="r-rules-saved" style="display:none"></div>
     </div>
   </div>
   <div class="row">
     <div class="field">
       <label>Students filter <span class="badge">optional</span></label>
       <input type="text" id="r-students" placeholder="Іванов, Петренко"/>
+      <div class="hint">Comma-separated surnames. Leave empty to re-grade all.</div>
     </div>
   </div>
   <div class="action-row">
@@ -389,13 +405,20 @@ async function loadCourses() {
   }
 }
 
-// ── Fetch tab: load assignments when course changes ───────────────────────────
+// ── Fetch tab: load assignments AND students when course changes ──────────────
 async function onFetchCourseChange() {
   const courseId = document.getElementById('f-course').value;
   const asel = document.getElementById('f-assignment');
+  const sList = document.getElementById('f-students-list');
   asel.disabled = true;
   asel.innerHTML = '<option>Loading…</option>';
-  if (!courseId) { asel.innerHTML = '<option>— pick a course first —</option>'; return; }
+  sList.innerHTML = '<span style="color:#475569;font-size:.8rem">Loading students…</span>';
+  if (!courseId) {
+    asel.innerHTML = '<option>— pick a course first —</option>';
+    sList.innerHTML = '<span style="color:#475569;font-size:.8rem">Pick a course to load students…</span>';
+    return;
+  }
+  // Load assignments
   try {
     const assigns = await apiFetch('/api/assignments?courseId=' + encodeURIComponent(courseId));
     asel.innerHTML = '<option value="">— select assignment —</option>';
@@ -408,6 +431,38 @@ async function onFetchCourseChange() {
   } catch(e) {
     asel.innerHTML = '<option>Error: ' + e.message + '</option>';
   }
+  // Load students
+  try {
+    const students = await apiFetch('/api/students?courseId=' + encodeURIComponent(courseId));
+    sList.innerHTML = '';
+    if (!students || !students.length) {
+      sList.innerHTML = '<span style="color:#475569;font-size:.8rem">No students found</span>';
+      return;
+    }
+    students.sort((a, b) => a.full_name.localeCompare(b.full_name, 'uk'));
+    students.forEach(s => {
+      const lbl = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = s.full_name;
+      cb.checked = true;
+      lbl.appendChild(cb);
+      lbl.appendChild(document.createTextNode(' ' + s.full_name));
+      sList.appendChild(lbl);
+    });
+  } catch(e) {
+    sList.innerHTML = '<span style="color:#f87171;font-size:.8rem">Could not load students: ' + e.message + '</span>';
+  }
+}
+
+function toggleAllStudents(prefix, checked) {
+  document.querySelectorAll('#' + prefix + '-students-list input[type=checkbox]').forEach(cb => cb.checked = checked);
+}
+
+function getCheckedStudents(prefix) {
+  const checked = [];
+  document.querySelectorAll('#' + prefix + '-students-list input[type=checkbox]:checked').forEach(cb => checked.push(cb.value));
+  return checked.join(',');
 }
 
 // ── Re-grade tab: load versions when assignment changes ───────────────────────
@@ -448,39 +503,96 @@ async function onRegradeAssignmentChange() {
 }
 </script>
 <script>
+// ── Saved rules helpers ───────────────────────────────────────────────────────
+const RULES_KEY = 'savedGradingRules';
+
+function onRulesFileChange(prefix) {
+  const input = document.getElementById(prefix + '-rules');
+  if (!input.files.length) return;
+  const file = input.files[0];
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      localStorage.setItem(RULES_KEY, JSON.stringify({ name: file.name, content: reader.result }));
+      renderSavedRulesIndicator(prefix);
+    } catch(e) { console.warn('Could not save rules to localStorage', e); }
+  };
+  reader.readAsText(file);
+}
+
+function renderSavedRulesIndicator(prefix) {
+  const saved = getSavedRules();
+  const el = document.getElementById(prefix + '-rules-saved');
+  if (!saved || !el) return;
+  el.style.display = 'block';
+  el.innerHTML = `<span class="rules-saved">💾 Saved: ${escHtml(saved.name)}
+    <button class="clear-btn" onclick="clearSavedRules('${prefix}')" title="Clear saved rules">✕</button>
+  </span>`;
+}
+
+function getSavedRules() {
+  try { return JSON.parse(localStorage.getItem(RULES_KEY)); } catch(_) { return null; }
+}
+
+function clearSavedRules(prefix) {
+  localStorage.removeItem(RULES_KEY);
+  const el = document.getElementById(prefix + '-rules-saved');
+  if (el) el.style.display = 'none';
+}
+
+function getRulesBlob(prefix) {
+  // 1. Prefer freshly selected file
+  const input = document.getElementById(prefix + '-rules');
+  if (input && input.files.length) return Promise.resolve(input.files[0]);
+  // 2. Fall back to localStorage cache
+  const saved = getSavedRules();
+  if (saved) return Promise.resolve(new Blob([saved.content], { type: 'text/plain' }));
+  return Promise.resolve(null);
+}
+
 // ── Start fetch & grade ───────────────────────────────────────────────────────
-function startFetch() {
+async function startFetch() {
   const assignRaw = document.getElementById('f-assignment').value;
   if (!assignRaw) { alert('Please select an assignment'); return; }
   const assign = JSON.parse(assignRaw);
-  const courseId = document.getElementById('f-course').value;
+  const courseEl = document.getElementById('f-course');
+  const courseId = courseEl.value;
+  const courseName = courseEl.options[courseEl.selectedIndex]?.text || '';
   const solutionInput = document.getElementById('f-solution');
   if (!solutionInput.files.length) { alert('Please select the teacher solution file'); return; }
 
+  const rulesBlob = await getRulesBlob('f');
+  if (!rulesBlob) { alert('Please select a grading rules file (it will be saved for next time)'); return; }
+
+  const checkedStudents = getCheckedStudents('f');
+
   const params = {
     course_id: courseId,
+    course_name: courseName,
     assignment_id: assign.id,
     assignment_title: assign.title,
-    students: document.getElementById('f-students').value.trim()
+    students: checkedStudents
   };
 
   const fd = new FormData();
   fd.append('params', JSON.stringify(params));
   fd.append('solution', solutionInput.files[0]);
-  const rulesInput = document.getElementById('f-rules');
-  if (rulesInput.files.length) fd.append('rules', rulesInput.files[0]);
+  fd.append('rules', rulesBlob);
 
   clearPanel('f');
   streamGrade('/api/grade', fd, 'f');
 }
 
 // ── Start re-grade ────────────────────────────────────────────────────────────
-function startRegrade() {
+async function startRegrade() {
   const val = document.getElementById('r-assignment').value;
   if (!val) { alert('Please select a local assignment'); return; }
   const a = JSON.parse(val);
   const solutionInput = document.getElementById('r-solution');
   if (!solutionInput.files.length) { alert('Please select the teacher solution file'); return; }
+
+  const rulesBlob = await getRulesBlob('r');
+  if (!rulesBlob) { alert('Please select a grading rules file (it will be saved for next time)'); return; }
 
   const params = {
     course_id: a.course_id,
@@ -492,8 +604,7 @@ function startRegrade() {
   const fd = new FormData();
   fd.append('params', JSON.stringify(params));
   fd.append('solution', solutionInput.files[0]);
-  const rulesInput = document.getElementById('r-rules');
-  if (rulesInput.files.length) fd.append('rules', rulesInput.files[0]);
+  fd.append('rules', rulesBlob);
 
   clearPanel('r');
   streamGrade('/api/regrade', fd, 'r');
@@ -633,6 +744,8 @@ async function apiFetch(url) {
 
 // Run after all functions are defined
 init();
+// Show saved rules indicators if cache exists
+['f', 'r'].forEach(p => renderSavedRulesIndicator(p));
 </script>
 </body>
 </html>

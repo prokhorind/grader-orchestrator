@@ -75,3 +75,22 @@ func GetStudentProfile(ctx context.Context, svc *googleclassroom.Service, course
 		Email:    s.Profile.EmailAddress,
 	}, nil
 }
+
+// ListStudents returns all enrolled students for a given course.
+func ListStudents(ctx context.Context, svc *googleclassroom.Service, courseID string) ([]StudentProfile, error) {
+	var students []StudentProfile
+	err := svc.Courses.Students.List(courseID).Pages(ctx, func(page *googleclassroom.ListStudentsResponse) error {
+		for _, s := range page.Students {
+			students = append(students, StudentProfile{
+				ID:       s.UserId,
+				FullName: s.Profile.Name.FullName,
+				Email:    s.Profile.EmailAddress,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing students for course %s: %w", courseID, err)
+	}
+	return students, nil
+}

@@ -49,6 +49,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("/api/auth-exchange", cfg.handleAuthExchange)
 	mux.HandleFunc("/api/courses", cfg.handleCourses)
 	mux.HandleFunc("/api/assignments", cfg.handleAssignments)
+	mux.HandleFunc("/api/students", cfg.handleStudents)
 	mux.HandleFunc("/api/local-assignments", cfg.handleLocalAssignments)
 	mux.HandleFunc("/api/local-versions", cfg.handleLocalVersions)
 	mux.HandleFunc("/api/grade", cfg.handleGrade)
@@ -95,6 +96,28 @@ func (cfg Config) handleAssignments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, assignments)
+}
+
+// ── API: /api/students?courseId=... ──────────────────────────────────────────
+
+func (cfg Config) handleStudents(w http.ResponseWriter, r *http.Request) {
+	courseID := r.URL.Query().Get("courseId")
+	if courseID == "" {
+		jsonError(w, "courseId is required", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	svc, _, err := classroom.NewService(ctx, cfg.CredsFile, cfg.TokenFile)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("auth error: %v", err), http.StatusUnauthorized)
+		return
+	}
+	students, err := classroom.ListStudents(ctx, svc, courseID)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, students)
 }
 
 // ── API: /api/local-assignments — scan submissions/ on disk ──────────────────
@@ -196,11 +219,10 @@ func (cfg Config) handleLocalVersions(w http.ResponseWriter, r *http.Request) {
 
 type gradeRequest struct {
 	CourseID        string `json:"course_id"`
+	CourseName      string `json:"course_name"`
 	AssignmentID    string `json:"assignment_id"`
 	AssignmentTitle string `json:"assignment_title"`
-	Students        string `json:"students"` // comma-separated surnames, empty = all
-	LMModel         string `json:"lm_model"`
-	LMTimeoutMin    int    `json:"lm_timeout_min"` // 0 → default 5 min
+	Students        string `json:"students"` // comma-separated full names, empty = all
 }
 
 type regradeRequest struct {
@@ -208,8 +230,6 @@ type regradeRequest struct {
 	AssignmentName string `json:"assignment_name"`
 	Timestamp      string `json:"timestamp"` // empty = latest
 	Students       string `json:"students"`
-	LMModel        string `json:"lm_model"`
-	LMTimeoutMin   int    `json:"lm_timeout_min"`
 }
 
 // saveSolutionTemp reads the uploaded solution file from the multipart request,
@@ -239,12 +259,12 @@ func saveSolutionTemp(r *http.Request, field string) (path string, cleanup func(
 }
 
 // readRulesFile reads the uploaded grading rules file from the multipart request.
-// If it's missing, it falls back to the workspace "prompts/grader.md".
-func readRulesFile(r *http.Request, workspace string) (string, error) {
+// Returns an error if the file is missing — the rules file is required.
+func readRulesFile(r *http.Request) (string, error) {
 	f, _, err := r.FormFile("rules")
 	if err != nil {
 		if err == http.ErrMissingFile {
-			return "", fmt.Errorf("failed to open grading rules file: %w", err)
+			return "", fmt.Errorf("grading rules file is required: please upload a rules file")
 		}
 		return "", fmt.Errorf("reading grading rules form file: %w", err)
 	}
@@ -282,11 +302,17 @@ func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rulesContent, err := readRulesFile(r, cfg.Workspace)
+	rulesContent, err := readRulesFile(r)
 	if err != nil {
 		cleanup()
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// Resolve course folder name: prefer the human-readable name, fall back to ID.
+	courseFolderName := req.CourseName
+	if courseFolderName == "" {
+		courseFolderName = req.CourseID
 	}
 
 	sseStream(w, func(send func(string)) {
@@ -305,20 +331,20 @@ func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
 		submissionsDir := filepath.Join(cfg.Workspace, "submissions")
 
 		subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient,
-			req.CourseID, req.AssignmentID, req.AssignmentTitle, submissionsDir, filter)
+			req.CourseID, courseFolderName, req.AssignmentID, req.AssignmentTitle, submissionsDir, filter)
 		if err != nil {
 			send(errorEvent("download failed: " + err.Error()))
 			return
 		}
 		send(logEvent(fmt.Sprintf("Downloaded %d submissions", len(subs))))
 
-		marks, err := runGrader(ctx, cfg, tmpPath, rulesContent, req.LMModel, req.LMTimeoutMin, subs, send)
+		marks, err := runGrader(ctx, cfg, tmpPath, rulesContent, subs, send)
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
 		}
 
-		outPath, err := grader.WriteMarks(cfg.Workspace, req.CourseID, req.AssignmentTitle, marks)
+		outPath, err := grader.WriteMarks(cfg.Workspace, courseFolderName, req.AssignmentTitle, marks)
 		if err != nil {
 			send(errorEvent("writing marks: " + err.Error()))
 			return
@@ -355,7 +381,7 @@ func (cfg Config) handleRegrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rulesContent, err := readRulesFile(r, cfg.Workspace)
+	rulesContent, err := readRulesFile(r)
 	if err != nil {
 		cleanup()
 		jsonError(w, err.Error(), http.StatusBadRequest)
@@ -374,7 +400,7 @@ func (cfg Config) handleRegrade(w http.ResponseWriter, r *http.Request) {
 		}
 		send(logEvent(fmt.Sprintf("Found %d student submissions on disk", len(subs))))
 
-		marks, err := runGrader(ctx, cfg, tmpPath, rulesContent, req.LMModel, req.LMTimeoutMin, subs, send)
+		marks, err := runGrader(ctx, cfg, tmpPath, rulesContent, subs, send)
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
@@ -416,13 +442,10 @@ func (cfg Config) handleMarks(w http.ResponseWriter, r *http.Request) {
 
 // ── shared grading helper ─────────────────────────────────────────────────────
 
-func runGrader(ctx context.Context, cfg Config, solutionPath, systemPrompt, lmModel string, lmTimeoutMin int, subs []classroom.Submission, send func(string)) ([]grader.Mark, error) {
-	timeout := time.Duration(lmTimeoutMin) * time.Minute
-	if timeout == 0 {
-		timeout = 5 * time.Minute
-	}
+func runGrader(ctx context.Context, cfg Config, solutionPath, systemPrompt string, subs []classroom.Submission, send func(string)) ([]grader.Mark, error) {
+	const defaultTimeout = 5 * time.Minute
 
-	lmClient := lmstudio.NewClient(cfg.LMStudioURL, lmModel, timeout)
+	lmClient := lmstudio.NewClient(cfg.LMStudioURL, "", defaultTimeout)
 	g := grader.New(grader.Config{
 		WorkspaceRoot:   cfg.Workspace,
 		TeacherSolution: solutionPath,

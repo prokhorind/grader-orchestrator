@@ -175,8 +175,8 @@ func fetchSubmissions(ctx context.Context, workspace, className, assignmentName,
 	filter := classroom.NewStudentFilter(splitCSV(studentsCSV))
 
 	log.Printf("[main] fetching submissions: course=%s (%s) assignment=%q", course.Name, course.ID, assignment.Title)
-	subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient, course.ID, assignment.ID, assignment.Title, submissionsDir, filter)
-	return subs, course.ID, err
+	subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient, course.ID, course.Name, assignment.ID, assignment.Title, submissionsDir, filter)
+	return subs, course.Name, err
 }
 
 // loadSubmissionsFromDisk reconstructs []classroom.Submission from already-downloaded

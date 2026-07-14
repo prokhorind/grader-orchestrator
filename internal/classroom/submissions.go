@@ -122,8 +122,8 @@ func withRetry(ctx context.Context, label string, fn func() error) error {
 }
 
 // DownloadSubmissions fetches all student submissions for an assignment and
-// saves them under baseDir/<courseID>/<assignmentTitle>/<studentID>/<timestamp>/
-func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, httpClient *http.Client, courseID, courseWorkID, assignmentTitle, baseDir string, filter StudentFilter) ([]Submission, error) {
+// saves them under baseDir/<courseFolderName>/<assignmentTitle>/<studentID>/<timestamp>/
+func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, httpClient *http.Client, courseID, courseFolderName, courseWorkID, assignmentTitle, baseDir string, filter StudentFilter) ([]Submission, error) {
 	driveSvc, err := drive.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("creating drive service: %w", err)
@@ -151,7 +151,7 @@ func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, http
 					continue
 				}
 
-				versionDir := filepath.Join(baseDir, courseID, Sanitize(assignmentTitle), sub.UserId, timestamp)
+				versionDir := filepath.Join(baseDir, Sanitize(courseFolderName), Sanitize(assignmentTitle), sub.UserId, timestamp)
 				if err := os.MkdirAll(versionDir, 0755); err != nil {
 					return err
 				}
