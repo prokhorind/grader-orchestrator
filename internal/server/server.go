@@ -238,6 +238,25 @@ func saveSolutionTemp(r *http.Request, field string) (path string, cleanup func(
 	return tmp.Name(), func() { os.Remove(tmp.Name()) }, nil
 }
 
+// readRulesFile reads the uploaded grading rules file from the multipart request.
+// If it's missing, it falls back to the workspace "prompts/grader.md".
+func readRulesFile(r *http.Request, workspace string) (string, error) {
+	f, _, err := r.FormFile("rules")
+	if err != nil {
+		if err == http.ErrMissingFile {
+			return "", fmt.Errorf("failed to open grading rules file: %w", err)
+		}
+		return "", fmt.Errorf("reading grading rules form file: %w", err)
+	}
+	defer f.Close()
+
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, f); err != nil {
+		return "", fmt.Errorf("reading uploaded grading rules file: %w", err)
+	}
+	return buf.String(), nil
+}
+
 // ── API: /api/grade — SSE stream, fetch from Classroom then grade ─────────────
 // Accepts multipart/form-data with fields:
 
@@ -259,6 +278,13 @@ func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
 
 	tmpPath, cleanup, err := saveSolutionTemp(r, "solution")
 	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	rulesContent, err := readRulesFile(r, cfg.Workspace)
+	if err != nil {
+		cleanup()
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -286,7 +312,7 @@ func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
 		}
 		send(logEvent(fmt.Sprintf("Downloaded %d submissions", len(subs))))
 
-		marks, err := runGrader(ctx, cfg, tmpPath, req.LMModel, req.LMTimeoutMin, subs, send)
+		marks, err := runGrader(ctx, cfg, tmpPath, rulesContent, req.LMModel, req.LMTimeoutMin, subs, send)
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
@@ -329,6 +355,13 @@ func (cfg Config) handleRegrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rulesContent, err := readRulesFile(r, cfg.Workspace)
+	if err != nil {
+		cleanup()
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	sseStream(w, func(send func(string)) {
 		defer cleanup()
 		ctx := r.Context()
@@ -341,7 +374,7 @@ func (cfg Config) handleRegrade(w http.ResponseWriter, r *http.Request) {
 		}
 		send(logEvent(fmt.Sprintf("Found %d student submissions on disk", len(subs))))
 
-		marks, err := runGrader(ctx, cfg, tmpPath, req.LMModel, req.LMTimeoutMin, subs, send)
+		marks, err := runGrader(ctx, cfg, tmpPath, rulesContent, req.LMModel, req.LMTimeoutMin, subs, send)
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
@@ -383,13 +416,7 @@ func (cfg Config) handleMarks(w http.ResponseWriter, r *http.Request) {
 
 // ── shared grading helper ─────────────────────────────────────────────────────
 
-func runGrader(ctx context.Context, cfg Config, solutionPath, lmModel string, lmTimeoutMin int, subs []classroom.Submission, send func(string)) ([]grader.Mark, error) {
-	promptPath := filepath.Join(cfg.Workspace, "prompts", "grader.md")
-	systemPrompt, err := os.ReadFile(promptPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading grader prompt from %s: %w", promptPath, err)
-	}
-
+func runGrader(ctx context.Context, cfg Config, solutionPath, systemPrompt, lmModel string, lmTimeoutMin int, subs []classroom.Submission, send func(string)) ([]grader.Mark, error) {
 	timeout := time.Duration(lmTimeoutMin) * time.Minute
 	if timeout == 0 {
 		timeout = 5 * time.Minute
@@ -399,7 +426,7 @@ func runGrader(ctx context.Context, cfg Config, solutionPath, lmModel string, lm
 	g := grader.New(grader.Config{
 		WorkspaceRoot:   cfg.Workspace,
 		TeacherSolution: solutionPath,
-		SystemPrompt:    string(systemPrompt),
+		SystemPrompt:    systemPrompt,
 	}, lmClient)
 
 	// Wrap grader with per-student SSE progress by using a logging interceptor

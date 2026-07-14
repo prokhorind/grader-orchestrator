@@ -151,10 +151,15 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
       </select>
     </div>
   </div>
-  <div class="form-grid full" style="margin-top:16px">
+  <div class="form-grid" style="margin-top:16px">
     <div class="field">
       <label>Teacher solution file</label>
       <input type="file" id="f-solution"/>
+    </div>
+    <div class="field">
+      <label>Grading rules file <span class="badge">optional</span></label>
+      <input type="file" id="f-rules"/>
+      <div class="hint">Leave empty to use workspace prompts/grader.md</div>
     </div>
   </div>
   <div class="row">
@@ -162,14 +167,6 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
       <label>Students filter <span class="badge">optional</span></label>
       <input type="text" id="f-students" placeholder="Іванов, Петренко"/>
       <div class="hint">Comma-separated surnames. Leave empty to grade all.</div>
-    </div>
-    <div class="field">
-      <label>LM model <span class="badge">optional</span></label>
-      <input type="text" id="f-model" placeholder="leave empty = loaded model"/>
-    </div>
-    <div class="field">
-      <label>LM timeout (min)</label>
-      <input type="number" id="f-timeout" value="5" min="1" max="60"/>
     </div>
   </div>
   <div class="action-row">
@@ -204,24 +201,21 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
       </div>
     </div>
   </div>
-  <div class="form-grid full" style="margin-top:16px">
+  <div class="form-grid" style="margin-top:16px">
     <div class="field">
       <label>Teacher solution file</label>
       <input type="file" id="r-solution"/>
+    </div>
+    <div class="field">
+      <label>Grading rules file <span class="badge">optional</span></label>
+      <input type="file" id="r-rules"/>
+      <div class="hint">Leave empty to use workspace prompts/grader.md</div>
     </div>
   </div>
   <div class="row">
     <div class="field">
       <label>Students filter <span class="badge">optional</span></label>
       <input type="text" id="r-students" placeholder="Іванов, Петренко"/>
-    </div>
-    <div class="field">
-      <label>LM model <span class="badge">optional</span></label>
-      <input type="text" id="r-model" placeholder="leave empty = loaded model"/>
-    </div>
-    <div class="field">
-      <label>LM timeout (min)</label>
-      <input type="number" id="r-timeout" value="5" min="1" max="60"/>
     </div>
   </div>
   <div class="action-row">
@@ -467,14 +461,14 @@ function startFetch() {
     course_id: courseId,
     assignment_id: assign.id,
     assignment_title: assign.title,
-    students: document.getElementById('f-students').value.trim(),
-    lm_model: document.getElementById('f-model').value.trim(),
-    lm_timeout_min: parseInt(document.getElementById('f-timeout').value) || 5
+    students: document.getElementById('f-students').value.trim()
   };
 
   const fd = new FormData();
   fd.append('params', JSON.stringify(params));
   fd.append('solution', solutionInput.files[0]);
+  const rulesInput = document.getElementById('f-rules');
+  if (rulesInput.files.length) fd.append('rules', rulesInput.files[0]);
 
   clearPanel('f');
   streamGrade('/api/grade', fd, 'f');
@@ -492,14 +486,14 @@ function startRegrade() {
     course_id: a.course_id,
     assignment_name: a.assignment_name,
     timestamp: selectedTs,
-    students: document.getElementById('r-students').value.trim(),
-    lm_model: document.getElementById('r-model').value.trim(),
-    lm_timeout_min: parseInt(document.getElementById('r-timeout').value) || 5
+    students: document.getElementById('r-students').value.trim()
   };
 
   const fd = new FormData();
   fd.append('params', JSON.stringify(params));
   fd.append('solution', solutionInput.files[0]);
+  const rulesInput = document.getElementById('r-rules');
+  if (rulesInput.files.length) fd.append('rules', rulesInput.files[0]);
 
   clearPanel('r');
   streamGrade('/api/regrade', fd, 'r');
