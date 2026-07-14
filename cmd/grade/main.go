@@ -61,18 +61,10 @@ func main() {
 		log.Fatalf("resolving solution path: %v", err)
 	}
 
-	// ── Resolve credentials from mcp-root if provided ─────────────────────────
-	if *mcpRootFlag != "" {
-		mcpRoot, err := filepath.Abs(*mcpRootFlag)
-		if err != nil {
-			log.Fatalf("resolving mcp-root path: %v", err)
-		}
-		if *credsFlag == "" {
-			*credsFlag = filepath.Join(mcpRoot, ".secrets", "credentials.json")
-		}
-		if *tokenFlag == "" {
-			*tokenFlag = filepath.Join(mcpRoot, ".secrets", "token.json")
-		}
+	// ── Resolve credentials and token paths ───────────────────────────────────
+	credsFile, tokenFile, err := classroom.ResolveCredentialsAndTokenPaths(*credsFlag, *tokenFlag, *mcpRootFlag)
+	if err != nil {
+		log.Fatalf("resolving credentials and token paths: %v", err)
 	}
 
 	// ── Load grader system prompt ─────────────────────────────────────────────
@@ -95,7 +87,7 @@ func main() {
 			log.Fatalf("loading submissions from disk: %v", err)
 		}
 	} else {
-		submissions, courseID, err = fetchSubmissions(ctx, workspace, *classFlag, *assignmentFlag, *credsFlag, *tokenFlag, *studentsFlag)
+		submissions, courseID, err = fetchSubmissions(ctx, workspace, *classFlag, *assignmentFlag, credsFile, tokenFile, *studentsFlag)
 		if err != nil {
 			log.Fatalf("fetching submissions: %v", err)
 		}
@@ -133,14 +125,15 @@ func main() {
 // fetchSubmissions authenticates with Google Classroom and downloads submissions.
 // Returns the submissions and the resolved numeric course ID.
 func fetchSubmissions(ctx context.Context, workspace, className, assignmentName, credsFile, tokenFile, studentsCSV string) ([]classroom.Submission, string, error) {
-	credsFile = firstNonEmpty(credsFile, os.Getenv("GOOGLE_CREDENTIALS_FILE"))
-	tokenFile = firstNonEmpty(tokenFile, os.Getenv("GOOGLE_TOKEN_FILE"))
-
-	if credsFile == "" {
-		return nil, "", fmt.Errorf("Google credentials file required: use -credentials or GOOGLE_CREDENTIALS_FILE env var")
+	if _, err := os.Stat(credsFile); os.IsNotExist(err) {
+		return nil, "", fmt.Errorf("Google credentials.json file not found at %s.\nPlease download it from Google Cloud Console and place it at that path, or specify -credentials / GOOGLE_CREDENTIALS_FILE.", credsFile)
 	}
-	if tokenFile == "" {
-		return nil, "", fmt.Errorf("Google token file required: use -token or GOOGLE_TOKEN_FILE env var")
+
+	if _, err := os.Stat(tokenFile); os.IsNotExist(err) {
+		log.Printf("Token file not found at %s. Initiating interactive OAuth2 flow...", tokenFile)
+		if err := classroom.RunAuthFlow(ctx, credsFile, tokenFile); err != nil {
+			return nil, "", fmt.Errorf("running authorization flow: %w", err)
+		}
 	}
 
 	svc, httpClient, err := classroom.NewService(ctx, credsFile, tokenFile)

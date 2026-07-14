@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/prokhorind/classroom-grader/internal/classroom"
 	"github.com/prokhorind/classroom-grader/internal/server"
 )
 
@@ -41,20 +42,9 @@ func main() {
 		log.Fatalf("resolving workspace path: %v", err)
 	}
 
-	creds := firstNonEmpty(*credsFlag, os.Getenv("GOOGLE_CREDENTIALS_FILE"))
-	token := firstNonEmpty(*tokenFlag, os.Getenv("GOOGLE_TOKEN_FILE"))
-
-	if *mcpRootFlag != "" {
-		mcpRoot, err := filepath.Abs(*mcpRootFlag)
-		if err != nil {
-			log.Fatalf("resolving mcp-root path: %v", err)
-		}
-		if creds == "" {
-			creds = filepath.Join(mcpRoot, ".secrets", "credentials.json")
-		}
-		if token == "" {
-			token = filepath.Join(mcpRoot, ".secrets", "token.json")
-		}
+	creds, token, err := classroom.ResolveCredentialsAndTokenPaths(*credsFlag, *tokenFlag, *mcpRootFlag)
+	if err != nil {
+		log.Fatalf("resolving credentials and token paths: %v", err)
 	}
 
 	cfg := server.Config{

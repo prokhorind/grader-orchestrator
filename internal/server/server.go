@@ -18,6 +18,7 @@ import (
 	"github.com/prokhorind/classroom-grader/internal/classroom"
 	"github.com/prokhorind/classroom-grader/internal/grader"
 	"github.com/prokhorind/classroom-grader/internal/lmstudio"
+	"golang.org/x/oauth2"
 )
 
 // Config holds the server-level configuration resolved at startup.
@@ -44,6 +45,8 @@ func New(cfg Config) http.Handler {
 		http.ServeFileFS(w, r, staticFS, "index.html")
 	})
 
+	mux.HandleFunc("/api/auth-status", cfg.handleAuthStatus)
+	mux.HandleFunc("/api/auth-exchange", cfg.handleAuthExchange)
 	mux.HandleFunc("/api/courses", cfg.handleCourses)
 	mux.HandleFunc("/api/assignments", cfg.handleAssignments)
 	mux.HandleFunc("/api/local-assignments", cfg.handleLocalAssignments)
@@ -589,4 +592,77 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// ── API: /api/auth-status and /api/auth-exchange ──────────────────────────────
+
+type AuthStatus struct {
+	CredentialsExists bool   `json:"credentials_exists"`
+	TokenExists       bool   `json:"token_exists"`
+	CredentialsPath   string `json:"credentials_path"`
+	TokenPath         string `json:"token_path"`
+	AuthURL           string `json:"auth_url,omitempty"`
+}
+
+func (cfg Config) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	status := AuthStatus{
+		CredentialsPath: cfg.CredsFile,
+		TokenPath:       cfg.TokenFile,
+	}
+
+	if _, err := os.Stat(cfg.CredsFile); err == nil {
+		status.CredentialsExists = true
+	}
+	if _, err := os.Stat(cfg.TokenFile); err == nil {
+		status.TokenExists = true
+	}
+
+	if status.CredentialsExists && !status.TokenExists {
+		config, err := classroom.OAuthConfigFromFile(cfg.CredsFile)
+		if err == nil {
+			status.AuthURL = config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+		}
+	}
+
+	jsonOK(w, status)
+}
+
+type AuthExchangeRequest struct {
+	Code string `json:"code"`
+}
+
+func (cfg Config) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req AuthExchangeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Code == "" {
+		jsonError(w, "code is required", http.StatusBadRequest)
+		return
+	}
+
+	config, err := classroom.OAuthConfigFromFile(cfg.CredsFile)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("loading credentials: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	tok, err := config.Exchange(r.Context(), req.Code)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("exchanging code: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if err := classroom.SaveToken(cfg.TokenFile, tok); err != nil {
+		jsonError(w, fmt.Sprintf("saving token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]string{"status": "ok"})
 }

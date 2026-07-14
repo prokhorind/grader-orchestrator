@@ -59,6 +59,66 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
 .ts-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .ts-btn{background:#1e2235;border:1px solid #2d3148;color:#94a3b8;border-radius:6px;padding:5px 12px;font-size:.78rem;cursor:pointer;transition:all .15s}
 .ts-btn:hover,.ts-btn.selected{border-color:#a78bfa;color:#a78bfa;background:#1a1428}
+.auth-card {
+  background: rgba(30, 41, 59, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(167, 139, 250, 0.2);
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 24px;
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  animation: fadeIn 0.4s ease-out;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.auth-card h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #a78bfa;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.auth-card p {
+  font-size: 0.875rem;
+  color: #94a3b8;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+.auth-card code {
+  background: #0f1117;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: #f43f5e;
+  font-family: monospace;
+  font-size: 0.8rem;
+}
+.auth-card .steps {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.auth-card .step {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.auth-card .step-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+.auth-code-input {
+  display: flex;
+  gap: 8px;
+}
+.auth-code-input input {
+  flex: 1;
+}
 </style>
 </head>
 <body>
@@ -76,10 +136,11 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
 <!-- ══ TAB: Fetch & Grade ════════════════════════════════════════════════════ -->
 <div id="pane-fetch" class="pane active">
   <div class="section-title">Fetch submissions from Google Classroom, then grade</div>
+  <div id="auth-panel" class="auth-card" style="display:none"></div>
   <div class="form-grid">
     <div class="field">
       <label>Course</label>
-      <select id="f-course" onchange="onFetchCourseChange()">
+      <select id="f-course" onchange="onFetchCourseChange()" disabled>
         <option value="">— loading courses… —</option>
       </select>
     </div>
@@ -195,18 +256,10 @@ let selectedTs = '';
 
 // ── Init: called from the bottom of the last script block once all functions are defined ──
 async function init() {
-  // Courses
-  try {
-    const courses = await apiFetch('/api/courses');
-    const sel = document.getElementById('f-course');
-    sel.innerHTML = '<option value="">— select course —</option>';
-    courses.forEach(c => {
-      const o = document.createElement('option');
-      o.value = c.id; o.textContent = c.name;
-      sel.appendChild(o);
-    });
-  } catch(e) {
-    addLog('f', '⚠ Could not load courses: ' + e.message, 'err');
+  // Check auth first
+  const isAuth = await checkAuthStatus();
+  if (isAuth) {
+    await loadCourses();
   }
 
   // Local assignments
@@ -222,6 +275,123 @@ async function init() {
     });
   } catch(e) {
     addLog('r', '⚠ Could not load local assignments: ' + e.message, 'err');
+  }
+}
+
+async function checkAuthStatus() {
+  try {
+    const status = await apiFetch('/api/auth-status');
+    const authPanel = document.getElementById('auth-panel');
+    const courseSel = document.getElementById('f-course');
+    const fetchBtn = document.getElementById('f-btn');
+
+    if (!status.credentials_exists) {
+      authPanel.style.display = 'block';
+      authPanel.innerHTML = `
+        <h2>🔑 Google Credentials Missing</h2>
+        <p>To fetch courses and assignments from Google Classroom, you need to configure your Google OAuth2 credentials.</p>
+        <div class="steps">
+          <div class="step">
+            <div class="step-title">1. Download credentials.json</div>
+            <p style="margin-bottom:8px">Go to the <a href="https://console.cloud.google.com/" target="_blank" style="color:#a78bfa">Google Cloud Console</a>, enable the <strong>Google Classroom API</strong> and <strong>Google Drive API</strong>, create an <strong>OAuth 2.0 Client ID</strong> (Desktop app), and download the JSON file.</p>
+          </div>
+          <div class="step">
+            <div class="step-title">2. Save credentials.json to:</div>
+            <code style="display:block;padding:8px 12px;margin:8px 0;word-break:break-all;">${escHtml(status.credentials_path)}</code>
+          </div>
+          <div class="step">
+            <button class="primary" style="align-self:flex-start" onclick="checkAuthStatus()">🔄 I've placed the file, check again</button>
+          </div>
+        </div>
+      `;
+      courseSel.disabled = true;
+      courseSel.innerHTML = '<option value="">— setup credentials first —</option>';
+      fetchBtn.disabled = true;
+      return false;
+    }
+
+    if (!status.token_exists) {
+      authPanel.style.display = 'block';
+      authPanel.innerHTML = `
+        <h2>🔒 Google Authentication Required</h2>
+        <p>OAuth credentials found, but you need to authorize this application to access your Google Classroom.</p>
+        <div class="steps">
+          <div class="step">
+            <div class="step-title">1. Authorize Application</div>
+            <p style="margin-bottom:8px">Click the button below to sign in with your Google account and grant the necessary permissions.</p>
+            <a href="${status.auth_url}" target="_blank" class="button primary" style="display:inline-block;text-align:center;text-decoration:none;padding:10px 20px;border-radius:6px;background:#7c3aed;color:#fff;font-weight:500;align-self:flex-start">🔗 Authorize Classroom Grader</a>
+          </div>
+          <div class="step" style="margin-top:8px">
+            <div class="step-title">2. Enter Authorization Code</div>
+            <p style="margin-bottom:8px">After authorizing, copy the code provided by Google and paste it below:</p>
+            <div class="auth-code-input">
+              <input type="text" id="auth-code" style="margin-right:8px" placeholder="Paste authentication code here" />
+              <button class="primary" id="submit-auth-btn" onclick="submitAuthCode()">Submit Code</button>
+            </div>
+          </div>
+        </div>
+      `;
+      courseSel.disabled = true;
+      courseSel.innerHTML = '<option value="">— authenticate first —</option>';
+      fetchBtn.disabled = true;
+      return false;
+    }
+
+    // Both exist
+    authPanel.style.display = 'none';
+    courseSel.disabled = false;
+    fetchBtn.disabled = false;
+    return true;
+  } catch(e) {
+    addLog('f', '⚠ Error checking auth status: ' + e.message, 'err');
+    return false;
+  }
+}
+
+async function submitAuthCode() {
+  const codeInput = document.getElementById('auth-code');
+  const code = codeInput ? codeInput.value.trim() : '';
+  if (!code) { alert('Please enter the authorization code'); return; }
+
+  const btn = document.getElementById('submit-auth-btn');
+  if (btn) btn.disabled = true;
+
+  try {
+    const response = await fetch('/api/auth-exchange', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code })
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || response.statusText);
+
+    addLog('f', '✔ Authentication successful! Loading courses...', 'ok');
+    const ok = await checkAuthStatus();
+    if (ok) {
+      await loadCourses();
+    }
+  } catch(e) {
+    alert('Authentication failed: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function loadCourses() {
+  const sel = document.getElementById('f-course');
+  sel.innerHTML = '<option value="">— loading courses… —</option>';
+  try {
+    const courses = await apiFetch('/api/courses');
+    sel.innerHTML = '<option value="">— select course —</option>';
+    courses.forEach(c => {
+      const o = document.createElement('option');
+      o.value = c.id; o.textContent = c.name;
+      sel.appendChild(o);
+    });
+  } catch(e) {
+    addLog('f', '⚠ Could not load courses: ' + e.message, 'err');
+    if (e.message.toLowerCase().includes('auth') || e.message.toLowerCase().includes('token')) {
+      checkAuthStatus();
+    }
   }
 }
 
