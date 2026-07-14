@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prokhorind/classroom-grader/internal/classroom"
 	"github.com/prokhorind/classroom-grader/internal/grader"
 	"github.com/prokhorind/classroom-grader/internal/lmstudio"
-	"github.com/prokhorind/google-classroom-mcp/classroom"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"golang.org/x/text/unicode/norm"

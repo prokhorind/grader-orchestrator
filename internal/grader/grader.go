@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/prokhorind/classroom-grader/internal/classroom"
 	"github.com/prokhorind/classroom-grader/internal/lmstudio"
-	"github.com/prokhorind/google-classroom-mcp/classroom"
 )
 
 // Mark is one graded student record — mirrors the marks.json schema.

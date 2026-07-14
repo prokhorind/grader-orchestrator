@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Classroom Grader</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
+header{background:#1a1d27;border-bottom:1px solid #2d3148;padding:16px 24px;display:flex;align-items:center;gap:12px}
+header h1{font-size:1.25rem;font-weight:600;color:#a78bfa}
+header span{font-size:.8rem;color:#64748b;background:#12141e;padding:2px 8px;border-radius:4px}
+.tabs{display:flex;gap:0;border-bottom:1px solid #2d3148;background:#1a1d27;padding:0 24px}
+.tab{padding:12px 20px;cursor:pointer;font-size:.875rem;color:#64748b;border-bottom:2px solid transparent;transition:all .15s}
+.tab:hover{color:#a78bfa}
+.tab.active{color:#a78bfa;border-bottom-color:#a78bfa}
+.pane{display:none;padding:24px;max-width:900px;margin:0 auto}
+.pane.active{display:block}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.form-grid.full{grid-template-columns:1fr}
+label{display:block;font-size:.8rem;color:#94a3b8;margin-bottom:4px}
+select,input[type=text],input[type=number]{width:100%;background:#1a1d27;border:1px solid #2d3148;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-size:.875rem;outline:none;transition:border .15s}
+select:focus,input:focus{border-color:#a78bfa}
+select:disabled{opacity:.5}
+.field{margin-bottom:0}
+.row{display:flex;gap:16px;margin-top:16px}
+.row .field{flex:1}
+button{padding:10px 20px;border-radius:6px;border:none;cursor:pointer;font-size:.875rem;font-weight:500;transition:all .15s}
+button.primary{background:#7c3aed;color:#fff}
+button.primary:hover{background:#6d28d9}
+button.primary:disabled{background:#3b2e5a;color:#64748b;cursor:not-allowed}
+button.secondary{background:#1e2235;color:#94a3b8;border:1px solid #2d3148}
+button.secondary:hover{border-color:#a78bfa;color:#a78bfa}
+.action-row{margin-top:20px;display:flex;gap:10px;align-items:center}
+.progress-wrap{flex:1;height:6px;background:#1e2235;border-radius:3px;overflow:hidden}
+.progress-bar{height:100%;background:#7c3aed;border-radius:3px;transition:width .3s;width:0%}
+.log-box{margin-top:20px;background:#0a0c12;border:1px solid #2d3148;border-radius:8px;padding:12px 14px;height:220px;overflow-y:auto;font-family:"SF Mono","Fira Code",monospace;font-size:.78rem;line-height:1.6;color:#94a3b8}
+.log-box .err{color:#f87171}
+.log-box .ok{color:#34d399}
+.results{margin-top:24px}
+.results h3{font-size:.875rem;color:#94a3b8;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th{text-align:left;padding:8px 12px;background:#1a1d27;color:#64748b;font-weight:500;border-bottom:1px solid #2d3148;white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid #16192a;vertical-align:top}
+tr:hover td{background:#16192a}
+.mark-chip{display:inline-block;min-width:28px;text-align:center;padding:2px 8px;border-radius:12px;font-weight:700;font-size:.8rem}
+.mark-hi{background:#064e3b;color:#34d399}
+.mark-mid{background:#451a03;color:#fb923c}
+.mark-lo{background:#450a0a;color:#f87171}
+.deductions{color:#94a3b8;font-size:.78rem}
+.comment{color:#cbd5e1;font-size:.8rem}
+.copy-btn{font-size:.75rem;padding:4px 10px}
+.section-title{font-size:.95rem;font-weight:600;color:#c4b5fd;margin-bottom:16px}
+.badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:.72rem;background:#1e2235;color:#64748b;border:1px solid #2d3148;margin-left:6px}
+.hint{font-size:.75rem;color:#475569;margin-top:5px}
+input[type=file]{width:100%;background:#1a1d27;border:1px solid #2d3148;border-radius:6px;padding:7px 10px;color:#94a3b8;font-size:.8rem;cursor:pointer}
+input[type=file]::file-selector-button{background:#2d3148;border:none;border-radius:4px;color:#c4b5fd;padding:4px 10px;font-size:.78rem;cursor:pointer;margin-right:10px}
+input[type=file]::file-selector-button:hover{background:#3b3f5c}
+.ts-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.ts-btn{background:#1e2235;border:1px solid #2d3148;color:#94a3b8;border-radius:6px;padding:5px 12px;font-size:.78rem;cursor:pointer;transition:all .15s}
+.ts-btn:hover,.ts-btn.selected{border-color:#a78bfa;color:#a78bfa;background:#1a1428}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#127979; Classroom Grader</h1>
+  <span>local LM Studio</span>
+</header>
+
+<div class="tabs">
+  <div class="tab active" data-tab="fetch">Fetch &amp; Grade</div>
+  <div class="tab" data-tab="regrade">Re-grade from Disk</div>
+</div>
+
+<!-- ══ TAB: Fetch & Grade ════════════════════════════════════════════════════ -->
+<div id="pane-fetch" class="pane active">
+  <div class="section-title">Fetch submissions from Google Classroom, then grade</div>
+  <div class="form-grid">
+    <div class="field">
+      <label>Course</label>
+      <select id="f-course" onchange="onFetchCourseChange()">
+        <option value="">— loading courses… —</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Assignment</label>
+      <select id="f-assignment" disabled>
+        <option value="">— pick a course first —</option>
+      </select>
+    </div>
+  </div>
+  <div class="form-grid full" style="margin-top:16px">
+    <div class="field">
+      <label>Teacher solution file</label>
+      <input type="file" id="f-solution"/>
+    </div>
+  </div>
+  <div class="row">
+    <div class="field">
+      <label>Students filter <span class="badge">optional</span></label>
+      <input type="text" id="f-students" placeholder="Іванов, Петренко"/>
+      <div class="hint">Comma-separated surnames. Leave empty to grade all.</div>
+    </div>
+    <div class="field">
+      <label>LM model <span class="badge">optional</span></label>
+      <input type="text" id="f-model" placeholder="leave empty = loaded model"/>
+    </div>
+    <div class="field">
+      <label>LM timeout (min)</label>
+      <input type="number" id="f-timeout" value="5" min="1" max="60"/>
+    </div>
+  </div>
+  <div class="action-row">
+    <button class="primary" id="f-btn" onclick="startFetch()">&#9654; Fetch &amp; Grade</button>
+    <div class="progress-wrap"><div class="progress-bar" id="f-progress"></div></div>
+    <span id="f-progress-label" style="font-size:.78rem;color:#64748b;white-space:nowrap"></span>
+  </div>
+  <div class="log-box" id="f-log"></div>
+  <div class="results" id="f-results" style="display:none">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <h3>Results</h3>
+      <button class="secondary copy-btn" onclick="copyMarks('f')">Copy JSON</button>
+    </div>
+    <div id="f-table"></div>
+  </div>
+</div>
+
+<!-- ══ TAB: Re-grade from Disk ══════════════════════════════════════════════ -->
+<div id="pane-regrade" class="pane">
+  <div class="section-title">Re-grade already-downloaded submissions</div>
+  <div class="form-grid">
+    <div class="field">
+      <label>Local assignment</label>
+      <select id="r-assignment" onchange="onRegradeAssignmentChange()">
+        <option value="">— loading… —</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Version (timestamp)</label>
+      <div class="ts-list" id="r-ts-list">
+        <span style="color:#475569;font-size:.8rem">Pick an assignment first</span>
+      </div>
+    </div>
+  </div>
+  <div class="form-grid full" style="margin-top:16px">
+    <div class="field">
+      <label>Teacher solution file</label>
+      <input type="file" id="r-solution"/>
+    </div>
+  </div>
+  <div class="row">
+    <div class="field">
+      <label>Students filter <span class="badge">optional</span></label>
+      <input type="text" id="r-students" placeholder="Іванов, Петренко"/>
+    </div>
+    <div class="field">
+      <label>LM model <span class="badge">optional</span></label>
+      <input type="text" id="r-model" placeholder="leave empty = loaded model"/>
+    </div>
+    <div class="field">
+      <label>LM timeout (min)</label>
+      <input type="number" id="r-timeout" value="5" min="1" max="60"/>
+    </div>
+  </div>
+  <div class="action-row">
+    <button class="primary" id="r-btn" onclick="startRegrade()">&#9654; Re-grade</button>
+    <div class="progress-wrap"><div class="progress-bar" id="r-progress"></div></div>
+    <span id="r-progress-label" style="font-size:.78rem;color:#64748b;white-space:nowrap"></span>
+  </div>
+  <div class="log-box" id="r-log"></div>
+  <div class="results" id="r-results" style="display:none">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <h3>Results</h3>
+      <button class="secondary copy-btn" onclick="copyMarks('r')">Copy JSON</button>
+    </div>
+    <div id="r-table"></div>
+  </div>
+</div>
+
+<script>
+// ── Tab switching ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('pane-' + t.dataset.tab).classList.add('active');
+  });
+});
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let lastMarks = { f: [], r: [] };
+let selectedTs = '';
+
+// ── Init: called from the bottom of the last script block once all functions are defined ──
+async function init() {
+  // Courses
+  try {
+    const courses = await apiFetch('/api/courses');
+    const sel = document.getElementById('f-course');
+    sel.innerHTML = '<option value="">— select course —</option>';
+    courses.forEach(c => {
+      const o = document.createElement('option');
+      o.value = c.id; o.textContent = c.name;
+      sel.appendChild(o);
+    });
+  } catch(e) {
+    addLog('f', '⚠ Could not load courses: ' + e.message, 'err');
+  }
+
+  // Local assignments
+  try {
+    const assigns = await apiFetch('/api/local-assignments');
+    const sel = document.getElementById('r-assignment');
+    sel.innerHTML = '<option value="">— select assignment —</option>';
+    assigns.forEach(a => {
+      const o = document.createElement('option');
+      o.value = JSON.stringify(a);
+      o.textContent = a.course_id + ' / ' + a.assignment_name;
+      sel.appendChild(o);
+    });
+  } catch(e) {
+    addLog('r', '⚠ Could not load local assignments: ' + e.message, 'err');
+  }
+}
+
+// ── Fetch tab: load assignments when course changes ───────────────────────────
+async function onFetchCourseChange() {
+  const courseId = document.getElementById('f-course').value;
+  const asel = document.getElementById('f-assignment');
+  asel.disabled = true;
+  asel.innerHTML = '<option>Loading…</option>';
+  if (!courseId) { asel.innerHTML = '<option>— pick a course first —</option>'; return; }
+  try {
+    const assigns = await apiFetch('/api/assignments?courseId=' + encodeURIComponent(courseId));
+    asel.innerHTML = '<option value="">— select assignment —</option>';
+    assigns.forEach(a => {
+      const o = document.createElement('option');
+      o.value = JSON.stringify(a); o.textContent = a.title;
+      asel.appendChild(o);
+    });
+    asel.disabled = false;
+  } catch(e) {
+    asel.innerHTML = '<option>Error: ' + e.message + '</option>';
+  }
+}
+
+// ── Re-grade tab: load versions when assignment changes ───────────────────────
+async function onRegradeAssignmentChange() {
+  const val = document.getElementById('r-assignment').value;
+  const tsList = document.getElementById('r-ts-list');
+  selectedTs = '';
+  tsList.innerHTML = '<span style="color:#475569;font-size:.8rem">Loading…</span>';
+  if (!val) return;
+
+  const a = JSON.parse(val);
+  try {
+    const versions = await apiFetch(
+      '/api/local-versions?courseId=' + encodeURIComponent(a.course_id) +
+      '&assignment=' + encodeURIComponent(a.assignment_name)
+    );
+    if (!versions.length) {
+      tsList.innerHTML = '<span style="color:#475569;font-size:.8rem">No downloaded versions found</span>';
+      return;
+    }
+    tsList.innerHTML = '';
+    versions.forEach((v, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'ts-btn' + (i === 0 ? ' selected' : '');
+      btn.textContent = v.timestamp + ' (' + v.student_count + ' students)';
+      btn.dataset.ts = v.timestamp;
+      if (i === 0) selectedTs = v.timestamp;
+      btn.addEventListener('click', () => {
+        tsList.querySelectorAll('.ts-btn').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        selectedTs = v.timestamp;
+      });
+      tsList.appendChild(btn);
+    });
+  } catch(e) {
+    tsList.innerHTML = '<span style="color:#f87171;font-size:.8rem">Error: ' + e.message + '</span>';
+  }
+}
+</script>
+<script>
+// ── Start fetch & grade ───────────────────────────────────────────────────────
+function startFetch() {
+  const assignRaw = document.getElementById('f-assignment').value;
+  if (!assignRaw) { alert('Please select an assignment'); return; }
+  const assign = JSON.parse(assignRaw);
+  const courseId = document.getElementById('f-course').value;
+  const solutionInput = document.getElementById('f-solution');
+  if (!solutionInput.files.length) { alert('Please select the teacher solution file'); return; }
+
+  const params = {
+    course_id: courseId,
+    assignment_id: assign.id,
+    assignment_title: assign.title,
+    students: document.getElementById('f-students').value.trim(),
+    lm_model: document.getElementById('f-model').value.trim(),
+    lm_timeout_min: parseInt(document.getElementById('f-timeout').value) || 5
+  };
+
+  const fd = new FormData();
+  fd.append('params', JSON.stringify(params));
+  fd.append('solution', solutionInput.files[0]);
+
+  clearPanel('f');
+  streamGrade('/api/grade', fd, 'f');
+}
+
+// ── Start re-grade ────────────────────────────────────────────────────────────
+function startRegrade() {
+  const val = document.getElementById('r-assignment').value;
+  if (!val) { alert('Please select a local assignment'); return; }
+  const a = JSON.parse(val);
+  const solutionInput = document.getElementById('r-solution');
+  if (!solutionInput.files.length) { alert('Please select the teacher solution file'); return; }
+
+  const params = {
+    course_id: a.course_id,
+    assignment_name: a.assignment_name,
+    timestamp: selectedTs,
+    students: document.getElementById('r-students').value.trim(),
+    lm_model: document.getElementById('r-model').value.trim(),
+    lm_timeout_min: parseInt(document.getElementById('r-timeout').value) || 5
+  };
+
+  const fd = new FormData();
+  fd.append('params', JSON.stringify(params));
+  fd.append('solution', solutionInput.files[0]);
+
+  clearPanel('r');
+  streamGrade('/api/regrade', fd, 'r');
+}
+
+// ── Generic SSE stream handler ────────────────────────────────────────────────
+function streamGrade(endpoint, formData, prefix) {
+  const btn = document.getElementById(prefix + '-btn');
+  btn.disabled = true;
+
+  fetch(endpoint, {
+    method: 'POST',
+    body: formData   // no Content-Type header — browser sets multipart boundary automatically
+  }).then(resp => {
+    if (!resp.ok) return resp.json().then(j => { throw new Error(j.error || resp.statusText); });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    function pump() {
+      reader.read().then(({ done, value }) => {
+        if (done) { btn.disabled = false; return; }
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        parts.forEach(part => {
+          const line = part.trim();
+          if (!line.startsWith('data:')) return;
+          try {
+            const ev = JSON.parse(line.slice(5).trim());
+            handleEvent(prefix, ev);
+          } catch(_) {}
+        });
+        pump();
+      });
+    }
+    pump();
+  }).catch(e => {
+    addLog(prefix, '⚠ ' + e.message, 'err');
+    btn.disabled = false;
+  });
+}
+
+// ── Handle SSE events ─────────────────────────────────────────────────────────
+function handleEvent(prefix, ev) {
+  if (ev.type === 'log') {
+    addLog(prefix, ev.message, '');
+  } else if (ev.type === 'error') {
+    addLog(prefix, '✖ ' + ev.message, 'err');
+    document.getElementById(prefix + '-btn').disabled = false;
+  } else if (ev.type === 'progress') {
+    const pct = ev.total > 0 ? Math.round(ev.current / ev.total * 100) : 0;
+    document.getElementById(prefix + '-progress').style.width = pct + '%';
+    document.getElementById(prefix + '-progress-label').textContent =
+      ev.total > 0 ? ev.current + ' / ' + ev.total : '';
+  } else if (ev.type === 'done') {
+    lastMarks[prefix] = ev.marks || [];
+    addLog(prefix, '✔ Done — ' + lastMarks[prefix].length + ' students graded', 'ok');
+    renderTable(prefix, lastMarks[prefix]);
+    document.getElementById(prefix + '-btn').disabled = false;
+  }
+}
+</script>
+<script>
+// ── Render results table ──────────────────────────────────────────────────────
+function renderTable(prefix, marks) {
+  const container = document.getElementById(prefix + '-results');
+  const tableDiv = document.getElementById(prefix + '-table');
+
+  if (!marks || marks.length === 0) {
+    tableDiv.innerHTML = '<p style="color:#64748b;font-size:.85rem">No marks to display.</p>';
+    container.style.display = 'block';
+    return;
+  }
+
+  // Sort by name
+  const sorted = [...marks].sort((a, b) => a.student_name.localeCompare(b.student_name, 'uk'));
+
+  let html = '<table><thead><tr><th>#</th><th>Student</th><th>Mark</th><th>Deductions</th><th>Comment</th></tr></thead><tbody>';
+  sorted.forEach((m, i) => {
+    const chipClass = m.mark >= 10 ? 'mark-hi' : m.mark >= 7 ? 'mark-mid' : 'mark-lo';
+    const deductions = m.deductions ? escHtml(m.deductions) : '<span style="color:#475569">—</span>';
+    html += `<tr>
+      <td style="color:#475569">${i + 1}</td>
+      <td><div style="font-weight:500">${escHtml(m.student_name)}</div>
+          <div style="font-size:.72rem;color:#475569">${escHtml(m.student_id || '')}</div></td>
+      <td><span class="mark-chip ${chipClass}">${m.mark}</span></td>
+      <td><span class="deductions">${deductions}</span></td>
+      <td><span class="comment">${m.comment ? escHtml(m.comment) : ''}</span></td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  tableDiv.innerHTML = html;
+  container.style.display = 'block';
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function addLog(prefix, msg, cls) {
+  const box = document.getElementById(prefix + '-log');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearPanel(prefix) {
+  document.getElementById(prefix + '-log').innerHTML = '';
+  document.getElementById(prefix + '-results').style.display = 'none';
+  document.getElementById(prefix + '-table').innerHTML = '';
+  document.getElementById(prefix + '-progress').style.width = '0%';
+  document.getElementById(prefix + '-progress-label').textContent = '';
+  lastMarks[prefix] = [];
+}
+
+function copyMarks(prefix) {
+  const json = JSON.stringify(lastMarks[prefix], null, 2);
+  navigator.clipboard.writeText(json).then(() => {
+    const btn = event.target;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy JSON', 1500);
+  });
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function apiFetch(url) {
+  const r = await fetch(url);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// Run after all functions are defined
+init();
+</script>
+</body>
+</html>
