@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prokhorind/classroom-grader/internal/classroom"
@@ -29,12 +30,42 @@ type Config struct {
 	LMStudioURL string
 }
 
+// srv is the internal handler type that owns mutable state.
+// All exported behaviour is wired through New() which returns http.Handler.
+type srv struct {
+	mu          sync.RWMutex
+	workspace   string // mutable — can be changed via /api/workspace
+	credsFile   string
+	tokenFile   string
+	lmStudioURL string
+}
+
+// getWorkspace returns the current workspace path under a read lock.
+func (s *srv) getWorkspace() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.workspace
+}
+
+// setWorkspace updates the workspace path under a write lock.
+func (s *srv) setWorkspace(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workspace = path
+}
+
 // New wires up all HTTP routes and returns the handler.
 func New(cfg Config) http.Handler {
+	s := &srv{
+		workspace:   cfg.Workspace,
+		credsFile:   cfg.CredsFile,
+		tokenFile:   cfg.TokenFile,
+		lmStudioURL: cfg.LMStudioURL,
+	}
+
 	mux := http.NewServeMux()
 
 	// Serve static files from the embedded "static/" sub-directory at the root path.
-	// StripPrefix removes the leading "/" so the file server looks inside "static/".
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -45,25 +76,115 @@ func New(cfg Config) http.Handler {
 		http.ServeFileFS(w, r, staticFS, "index.html")
 	})
 
-	mux.HandleFunc("/api/auth-status", cfg.handleAuthStatus)
-	mux.HandleFunc("/api/auth-exchange", cfg.handleAuthExchange)
-	mux.HandleFunc("/api/courses", cfg.handleCourses)
-	mux.HandleFunc("/api/assignments", cfg.handleAssignments)
-	mux.HandleFunc("/api/students", cfg.handleStudents)
-	mux.HandleFunc("/api/local-assignments", cfg.handleLocalAssignments)
-	mux.HandleFunc("/api/local-versions", cfg.handleLocalVersions)
-	mux.HandleFunc("/api/grade", cfg.handleGrade)
-	mux.HandleFunc("/api/regrade", cfg.handleRegrade)
-	mux.HandleFunc("/api/marks", cfg.handleMarks)
+	mux.HandleFunc("/api/auth-status", s.handleAuthStatus)
+	mux.HandleFunc("/api/upload-credentials", s.handleUploadCredentials)
+	mux.HandleFunc("/api/auth-exchange", s.handleAuthExchange)
+	mux.HandleFunc("/api/workspace", s.handleWorkspace)
+	mux.HandleFunc("/api/lm-url", s.handleLMURL)
+	mux.HandleFunc("/api/courses", s.handleCourses)
+	mux.HandleFunc("/api/assignments", s.handleAssignments)
+	mux.HandleFunc("/api/students", s.handleStudents)
+	mux.HandleFunc("/api/local-assignments", s.handleLocalAssignments)
+	mux.HandleFunc("/api/local-versions", s.handleLocalVersions)
+	mux.HandleFunc("/api/grade", s.handleGrade)
+	mux.HandleFunc("/api/regrade", s.handleRegrade)
+	mux.HandleFunc("/api/marks", s.handleMarks)
+	mux.HandleFunc("/api/patch-mark", s.handlePatchMark)
 
 	return mux
 }
 
+// ── API: /api/workspace ───────────────────────────────────────────────────────
+
+type workspaceResponse struct {
+	Workspace string `json:"workspace"`
+}
+
+// handleWorkspace handles GET (read current path) and POST (update path).
+func (s *srv) handleWorkspace(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, workspaceResponse{Workspace: s.getWorkspace()})
+
+	case http.MethodPost:
+		var req workspaceResponse
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Workspace == "" {
+			jsonError(w, "workspace path is required", http.StatusBadRequest)
+			return
+		}
+		abs, err := filepath.Abs(req.Workspace)
+		if err != nil {
+			jsonError(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Create the directory if it doesn't exist yet.
+		if err := os.MkdirAll(abs, 0755); err != nil {
+			jsonError(w, "creating workspace dir: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.setWorkspace(abs)
+		log.Printf("[workspace] changed to %s", abs)
+		jsonOK(w, workspaceResponse{Workspace: abs})
+
+	default:
+		jsonError(w, "GET or POST required", http.StatusMethodNotAllowed)
+	}
+}
+
+// getLMStudioURL returns the current LM Studio URL under a read lock.
+func (s *srv) getLMStudioURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lmStudioURL
+}
+
+// setLMStudioURL updates the LM Studio URL under a write lock.
+func (s *srv) setLMStudioURL(url string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lmStudioURL = url
+}
+
+// ── API: /api/lm-url ──────────────────────────────────────────────────────────
+
+type lmURLResponse struct {
+	LMURL string `json:"lm_url"`
+}
+
+// handleLMURL handles GET (read current URL) and POST (update URL).
+func (s *srv) handleLMURL(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, lmURLResponse{LMURL: s.getLMStudioURL()})
+
+	case http.MethodPost:
+		var req lmURLResponse
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.LMURL == "" {
+			jsonError(w, "lm_url is required", http.StatusBadRequest)
+			return
+		}
+		s.setLMStudioURL(req.LMURL)
+		log.Printf("[lm-url] changed to %s", req.LMURL)
+		jsonOK(w, lmURLResponse{LMURL: req.LMURL})
+
+	default:
+		jsonError(w, "GET or POST required", http.StatusMethodNotAllowed)
+	}
+}
+
 // ── API: /api/courses ─────────────────────────────────────────────────────────
 
-func (cfg Config) handleCourses(w http.ResponseWriter, r *http.Request) {
+func (s *srv) handleCourses(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	svc, _, err := classroom.NewService(ctx, cfg.CredsFile, cfg.TokenFile)
+	svc, _, err := classroom.NewService(ctx, s.credsFile, s.tokenFile)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("auth error: %v", err), http.StatusUnauthorized)
 		return
@@ -78,14 +199,14 @@ func (cfg Config) handleCourses(w http.ResponseWriter, r *http.Request) {
 
 // ── API: /api/assignments?courseId=... ────────────────────────────────────────
 
-func (cfg Config) handleAssignments(w http.ResponseWriter, r *http.Request) {
+func (s *srv) handleAssignments(w http.ResponseWriter, r *http.Request) {
 	courseID := r.URL.Query().Get("courseId")
 	if courseID == "" {
 		jsonError(w, "courseId is required", http.StatusBadRequest)
 		return
 	}
 	ctx := r.Context()
-	svc, _, err := classroom.NewService(ctx, cfg.CredsFile, cfg.TokenFile)
+	svc, _, err := classroom.NewService(ctx, s.credsFile, s.tokenFile)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("auth error: %v", err), http.StatusUnauthorized)
 		return
@@ -100,14 +221,14 @@ func (cfg Config) handleAssignments(w http.ResponseWriter, r *http.Request) {
 
 // ── API: /api/students?courseId=... ──────────────────────────────────────────
 
-func (cfg Config) handleStudents(w http.ResponseWriter, r *http.Request) {
+func (s *srv) handleStudents(w http.ResponseWriter, r *http.Request) {
 	courseID := r.URL.Query().Get("courseId")
 	if courseID == "" {
 		jsonError(w, "courseId is required", http.StatusBadRequest)
 		return
 	}
 	ctx := r.Context()
-	svc, _, err := classroom.NewService(ctx, cfg.CredsFile, cfg.TokenFile)
+	svc, _, err := classroom.NewService(ctx, s.credsFile, s.tokenFile)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("auth error: %v", err), http.StatusUnauthorized)
 		return
@@ -127,8 +248,8 @@ type localAssignment struct {
 	AssignmentName string `json:"assignment_name"`
 }
 
-func (cfg Config) handleLocalAssignments(w http.ResponseWriter, r *http.Request) {
-	root := filepath.Join(cfg.Workspace, "submissions")
+func (s *srv) handleLocalAssignments(w http.ResponseWriter, r *http.Request) {
+	root := filepath.Join(s.getWorkspace(), "submissions")
 	var results []localAssignment
 
 	courseDirs, err := os.ReadDir(root)
@@ -169,7 +290,7 @@ type localVersion struct {
 	StudentCount int    `json:"student_count"`
 }
 
-func (cfg Config) handleLocalVersions(w http.ResponseWriter, r *http.Request) {
+func (s *srv) handleLocalVersions(w http.ResponseWriter, r *http.Request) {
 	courseID := r.URL.Query().Get("courseId")
 	assignment := r.URL.Query().Get("assignment")
 	if courseID == "" || assignment == "" {
@@ -177,7 +298,7 @@ func (cfg Config) handleLocalVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	assignDir := filepath.Join(cfg.Workspace, "submissions", courseID, assignment)
+	assignDir := filepath.Join(s.getWorkspace(), "submissions", courseID, assignment)
 	studentDirs, err := os.ReadDir(assignDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -241,7 +362,6 @@ func saveSolutionTemp(r *http.Request, field string) (path string, cleanup func(
 	}
 	defer f.Close()
 
-	// Preserve the original file extension so the grader prompt context is accurate
 	ext := filepath.Ext(hdr.Filename)
 	tmp, err := os.CreateTemp("", "solution-*"+ext)
 	if err != nil {
@@ -259,7 +379,6 @@ func saveSolutionTemp(r *http.Request, field string) (path string, cleanup func(
 }
 
 // readRulesFile reads the uploaded grading rules file from the multipart request.
-// Returns an error if the file is missing — the rules file is required.
 func readRulesFile(r *http.Request) (string, error) {
 	f, _, err := r.FormFile("rules")
 	if err != nil {
@@ -278,9 +397,8 @@ func readRulesFile(r *http.Request) (string, error) {
 }
 
 // ── API: /api/grade — SSE stream, fetch from Classroom then grade ─────────────
-// Accepts multipart/form-data with fields:
 
-func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
+func (s *srv) handleGrade(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "POST required", http.StatusMethodNotAllowed)
 		return
@@ -309,18 +427,23 @@ func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve course folder name: prefer the human-readable name, fall back to ID.
 	courseFolderName := req.CourseName
 	if courseFolderName == "" {
 		courseFolderName = req.CourseID
 	}
+
+	// Snapshot mutable fields once for the lifetime of this request.
+	workspace := s.getWorkspace()
+	credsFile := s.credsFile
+	tokenFile := s.tokenFile
+	lmStudioURL := s.getLMStudioURL()
 
 	sseStream(w, func(send func(string)) {
 		defer cleanup()
 		ctx := r.Context()
 
 		send(logEvent("Authenticating with Google Classroom…"))
-		svc, httpClient, err := classroom.NewService(ctx, cfg.CredsFile, cfg.TokenFile)
+		svc, httpClient, err := classroom.NewService(ctx, credsFile, tokenFile)
 		if err != nil {
 			send(errorEvent("auth failed: " + err.Error()))
 			return
@@ -328,7 +451,7 @@ func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
 
 		send(logEvent(fmt.Sprintf("Fetching submissions for assignment %q…", req.AssignmentTitle)))
 		filter := classroom.NewStudentFilter(splitCSV(req.Students))
-		submissionsDir := filepath.Join(cfg.Workspace, "submissions")
+		submissionsDir := filepath.Join(workspace, "submissions")
 
 		subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient,
 			req.CourseID, courseFolderName, req.AssignmentID, req.AssignmentTitle, submissionsDir, filter)
@@ -338,13 +461,22 @@ func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
 		}
 		send(logEvent(fmt.Sprintf("Downloaded %d submissions", len(subs))))
 
-		marks, err := runGrader(ctx, cfg, tmpPath, rulesContent, subs, send)
+		marks, err := runGrader(ctx, workspace, lmStudioURL, tmpPath, rulesContent, subs, send)
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
 		}
 
-		outPath, err := grader.WriteMarks(cfg.Workspace, courseFolderName, req.AssignmentTitle, marks)
+		// Use the timestamp from the first submission (all share the same one per fetch run).
+		timestamp := ""
+		if len(subs) > 0 {
+			timestamp = subs[0].Version
+		}
+		if timestamp == "" {
+			timestamp = time.Now().Local().Format("2006-01-02T15-04-05")
+		}
+
+		outPath, err := grader.WriteMarks(workspace, courseFolderName, req.AssignmentTitle, timestamp, marks)
 		if err != nil {
 			send(errorEvent("writing marks: " + err.Error()))
 			return
@@ -355,11 +487,8 @@ func (cfg Config) handleGrade(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── API: /api/regrade — SSE stream, use already-downloaded files ──────────────
-// Accepts multipart/form-data with fields:
-//   params   – JSON-encoded regradeRequest (without solution_path)
-//   solution – the teacher solution file
 
-func (cfg Config) handleRegrade(w http.ResponseWriter, r *http.Request) {
+func (s *srv) handleRegrade(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "POST required", http.StatusMethodNotAllowed)
 		return
@@ -388,25 +517,29 @@ func (cfg Config) handleRegrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Snapshot mutable fields once for the lifetime of this request.
+	workspace := s.getWorkspace()
+	lmStudioURL := s.getLMStudioURL()
+
 	sseStream(w, func(send func(string)) {
 		defer cleanup()
 		ctx := r.Context()
 
 		send(logEvent(fmt.Sprintf("Loading submissions from disk: %s / %s", req.CourseID, req.AssignmentName)))
-		subs, err := loadSubmissionsFromDisk(cfg.Workspace, req.CourseID, req.AssignmentName, req.Timestamp, splitCSV(req.Students))
+		subs, resolvedTS, err := loadSubmissionsFromDisk(workspace, req.CourseID, req.AssignmentName, req.Timestamp, splitCSV(req.Students))
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
 		}
 		send(logEvent(fmt.Sprintf("Found %d student submissions on disk", len(subs))))
 
-		marks, err := runGrader(ctx, cfg, tmpPath, rulesContent, subs, send)
+		marks, err := runGrader(ctx, workspace, lmStudioURL, tmpPath, rulesContent, subs, send)
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
 		}
 
-		outPath, err := grader.WriteMarks(cfg.Workspace, req.CourseID, req.AssignmentName, marks)
+		outPath, err := grader.WriteMarks(workspace, req.CourseID, req.AssignmentName, resolvedTS, marks)
 		if err != nil {
 			send(errorEvent("writing marks: " + err.Error()))
 			return
@@ -418,7 +551,10 @@ func (cfg Config) handleRegrade(w http.ResponseWriter, r *http.Request) {
 
 // ── API: /api/marks?courseId=...&assignment=... ───────────────────────────────
 
-func (cfg Config) handleMarks(w http.ResponseWriter, r *http.Request) {
+// ── API: /api/marks?courseId=...&assignment=...&timestamp=... ─────────────────
+// timestamp is optional; if omitted, the latest timestamp dir is used.
+
+func (s *srv) handleMarks(w http.ResponseWriter, r *http.Request) {
 	courseID := r.URL.Query().Get("courseId")
 	assignment := r.URL.Query().Get("assignment")
 	if courseID == "" || assignment == "" {
@@ -426,7 +562,22 @@ func (cfg Config) handleMarks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path := filepath.Join(cfg.Workspace, "submissions", courseID, classroom.Sanitize(assignment), "marks.json")
+	assignDir := filepath.Join(s.getWorkspace(), "submissions",
+		classroom.Sanitize(courseID),
+		classroom.Sanitize(assignment))
+
+	timestamp := r.URL.Query().Get("timestamp")
+	if timestamp == "" {
+		// Find the latest timestamp dir that contains a marks.json.
+		ts, err := latestMarksTimestamp(assignDir)
+		if err != nil {
+			jsonOK(w, []any{})
+			return
+		}
+		timestamp = ts
+	}
+
+	path := filepath.Join(assignDir, timestamp, "marks.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -440,19 +591,135 @@ func (cfg Config) handleMarks(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+// latestMarksTimestamp returns the lexicographically newest subdir of assignDir
+// that contains a marks.json file.
+func latestMarksTimestamp(assignDir string) (string, error) {
+	entries, err := os.ReadDir(assignDir)
+	if err != nil {
+		return "", err
+	}
+	var latest string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if e.Name() <= latest {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(assignDir, e.Name(), "marks.json")); err == nil {
+			latest = e.Name()
+		}
+	}
+	if latest == "" {
+		return "", fmt.Errorf("no marks.json found under %s", assignDir)
+	}
+	return latest, nil
+}
+
+// ── API: /api/patch-mark — update a single student mark without re-grading ────
+// POST JSON body: { course_id, assignment_name, timestamp, student_name, mark, deductions, comment }
+// timestamp is optional; if omitted the latest timestamp with a marks.json is used.
+
+type patchMarkRequest struct {
+	CourseID       string `json:"course_id"`
+	AssignmentName string `json:"assignment_name"`
+	Timestamp      string `json:"timestamp"`
+	StudentName    string `json:"student_name"`
+	Mark           int    `json:"mark"`
+	Deductions     string `json:"deductions"`
+	Comment        string `json:"comment"`
+}
+
+func (s *srv) handlePatchMark(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req patchMarkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.CourseID == "" || req.AssignmentName == "" || req.StudentName == "" {
+		jsonError(w, "course_id, assignment_name and student_name are required", http.StatusBadRequest)
+		return
+	}
+	if req.Mark < 1 || req.Mark > 12 {
+		jsonError(w, "mark must be between 1 and 12", http.StatusBadRequest)
+		return
+	}
+
+	assignDir := filepath.Join(s.getWorkspace(), "submissions",
+		classroom.Sanitize(req.CourseID),
+		classroom.Sanitize(req.AssignmentName))
+
+	timestamp := req.Timestamp
+	if timestamp == "" {
+		ts, err := latestMarksTimestamp(assignDir)
+		if err != nil {
+			jsonError(w, "no marks found for this assignment", http.StatusNotFound)
+			return
+		}
+		timestamp = ts
+	}
+
+	marksPath := filepath.Join(assignDir, timestamp, "marks.json")
+	marks := grader.ReadMarksFile(marksPath)
+	if marks == nil {
+		jsonError(w, "marks.json not found for timestamp "+timestamp, http.StatusNotFound)
+		return
+	}
+
+	// Find and update the matching student, or append if not present.
+	found := false
+	for i, m := range marks {
+		if m.StudentName == req.StudentName {
+			marks[i].Mark = req.Mark
+			marks[i].Deductions = req.Deductions
+			marks[i].Comment = req.Comment
+			found = true
+			break
+		}
+	}
+	if !found {
+		marks = append(marks, grader.Mark{
+			StudentName: req.StudentName,
+			Mark:        req.Mark,
+			Deductions:  req.Deductions,
+			Comment:     req.Comment,
+		})
+	}
+
+	// Sort and write back.
+	sort.Slice(marks, func(i, j int) bool {
+		return marks[i].StudentName < marks[j].StudentName
+	})
+	data, err := json.MarshalIndent(marks, "", "  ")
+	if err != nil {
+		jsonError(w, "marshalling marks: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.WriteFile(marksPath, data, 0644); err != nil {
+		jsonError(w, "writing marks.json: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("[patch-mark] %s / %s / %s → %d", req.CourseID, req.AssignmentName, req.StudentName, req.Mark)
+	jsonOK(w, map[string]string{"status": "ok", "timestamp": timestamp})
+}
+
 // ── shared grading helper ─────────────────────────────────────────────────────
 
-func runGrader(ctx context.Context, cfg Config, solutionPath, systemPrompt string, subs []classroom.Submission, send func(string)) ([]grader.Mark, error) {
+func runGrader(ctx context.Context, workspace, lmStudioURL, solutionPath, systemPrompt string, subs []classroom.Submission, send func(string)) ([]grader.Mark, error) {
 	const defaultTimeout = 5 * time.Minute
 
-	lmClient := lmstudio.NewClient(cfg.LMStudioURL, "", defaultTimeout)
+	lmClient := lmstudio.NewClient(lmStudioURL, "", defaultTimeout)
 	g := grader.New(grader.Config{
-		WorkspaceRoot:   cfg.Workspace,
+		WorkspaceRoot:   workspace,
 		TeacherSolution: solutionPath,
 		SystemPrompt:    systemPrompt,
 	}, lmClient)
 
-	// Wrap grader with per-student SSE progress by using a logging interceptor
 	total := len(subs)
 	var marks []grader.Mark
 	for i, sub := range subs {
@@ -475,11 +742,29 @@ func runGrader(ctx context.Context, cfg Config, solutionPath, systemPrompt strin
 
 // ── disk loader for re-grade ──────────────────────────────────────────────────
 
-func loadSubmissionsFromDisk(workspace, courseID, assignmentName, timestamp string, studentFilter []string) ([]classroom.Submission, error) {
+func loadSubmissionsFromDisk(workspace, courseID, assignmentName, timestamp string, studentFilter []string) ([]classroom.Submission, string, error) {
 	assignDir := filepath.Join(workspace, "submissions", courseID, assignmentName)
 	studentDirs, err := os.ReadDir(assignDir)
 	if err != nil {
-		return nil, fmt.Errorf("reading assignment dir %s: %w", assignDir, err)
+		return nil, "", fmt.Errorf("reading assignment dir %s: %w", assignDir, err)
+	}
+
+	// Resolve the timestamp we'll actually use: explicit > latest across students.
+	resolvedTS := timestamp
+	if resolvedTS == "" {
+		// Find the latest timestamp present across any student dir.
+		for _, sd := range studentDirs {
+			if !sd.IsDir() {
+				continue
+			}
+			latest, err := latestSubdirName(filepath.Join(assignDir, sd.Name()))
+			if err != nil {
+				continue
+			}
+			if latest > resolvedTS {
+				resolvedTS = latest
+			}
+		}
 	}
 
 	filter := classroom.NewStudentFilter(studentFilter)
@@ -492,18 +777,9 @@ func loadSubmissionsFromDisk(workspace, courseID, assignmentName, timestamp stri
 		studentID := sd.Name()
 		studentDir := filepath.Join(assignDir, studentID)
 
-		var versionDir string
-		if timestamp != "" {
-			versionDir = filepath.Join(studentDir, timestamp)
-			if _, err := os.Stat(versionDir); err != nil {
-				continue // this student has no entry for the requested timestamp
-			}
-		} else {
-			versionDir, err = latestSubdir(studentDir)
-			if err != nil {
-				log.Printf("[regrade] WARN: skipping %s: %v", studentID, err)
-				continue
-			}
+		versionDir := filepath.Join(studentDir, resolvedTS)
+		if _, err := os.Stat(versionDir); err != nil {
+			continue // this student has no entry for the resolved timestamp
 		}
 
 		profile, _ := readStudentJSON(filepath.Join(versionDir, "student.json"))
@@ -535,10 +811,18 @@ func loadSubmissionsFromDisk(workspace, courseID, assignmentName, timestamp stri
 			Files:        files,
 		})
 	}
-	return submissions, nil
+	return submissions, resolvedTS, nil
 }
 
 func latestSubdir(dir string) (string, error) {
+	name, err := latestSubdirName(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name), nil
+}
+
+func latestSubdirName(dir string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", err
@@ -552,7 +836,7 @@ func latestSubdir(dir string) (string, error) {
 	if latest == "" {
 		return "", fmt.Errorf("no timestamp subdirectories in %s", dir)
 	}
-	return filepath.Join(dir, latest), nil
+	return latest, nil
 }
 
 func readStudentJSON(path string) (classroom.StudentProfile, error) {
@@ -566,8 +850,6 @@ func readStudentJSON(path string) (classroom.StudentProfile, error) {
 
 // ── SSE helpers ───────────────────────────────────────────────────────────────
 
-// sseStream sets SSE headers and calls fn with a send function.
-// fn should write events via send() and return when done.
 func sseStream(w http.ResponseWriter, fn func(send func(string))) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -644,7 +926,7 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// ── API: /api/auth-status and /api/auth-exchange ──────────────────────────────
+// ── API: /api/auth-status ─────────────────────────────────────────────────────
 
 type AuthStatus struct {
 	CredentialsExists bool   `json:"credentials_exists"`
@@ -654,21 +936,28 @@ type AuthStatus struct {
 	AuthURL           string `json:"auth_url,omitempty"`
 }
 
-func (cfg Config) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+func (s *srv) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	status := AuthStatus{
-		CredentialsPath: cfg.CredsFile,
-		TokenPath:       cfg.TokenFile,
+		CredentialsPath: s.credsFile,
+		TokenPath:       s.tokenFile,
 	}
 
-	if _, err := os.Stat(cfg.CredsFile); err == nil {
+	if _, err := os.Stat(s.credsFile); err == nil {
 		status.CredentialsExists = true
 	}
-	if _, err := os.Stat(cfg.TokenFile); err == nil {
+	if _, err := os.Stat(s.tokenFile); err == nil {
 		status.TokenExists = true
 	}
 
+	// Even when a token file exists, check whether it is still valid.
+	if status.CredentialsExists && status.TokenExists {
+		if tok, err := classroom.LoadToken(s.tokenFile); err != nil || !tok.Valid() {
+			status.TokenExists = false
+		}
+	}
+
 	if status.CredentialsExists && !status.TokenExists {
-		config, err := classroom.OAuthConfigFromFile(cfg.CredsFile)
+		config, err := classroom.OAuthConfigFromFile(s.credsFile)
 		if err == nil {
 			status.AuthURL = config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 		}
@@ -677,11 +966,55 @@ func (cfg Config) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, status)
 }
 
+// ── API: /api/upload-credentials ─────────────────────────────────────────────
+
+func (s *srv) handleUploadCredentials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		jsonError(w, "multipart parse error: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	f, _, err := r.FormFile("credentials")
+	if err != nil {
+		jsonError(w, "credentials file required", http.StatusBadRequest)
+		return
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		jsonError(w, "reading uploaded file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := classroom.OAuthConfigFromBytes(data); err != nil {
+		jsonError(w, "invalid credentials file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(s.credsFile), 0700); err != nil {
+		jsonError(w, "creating config dir: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.WriteFile(s.credsFile, data, 0600); err != nil {
+		jsonError(w, "saving credentials: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]string{"status": "ok", "path": s.credsFile})
+}
+
+// ── API: /api/auth-exchange ───────────────────────────────────────────────────
+
 type AuthExchangeRequest struct {
 	Code string `json:"code"`
 }
 
-func (cfg Config) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
+func (s *srv) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, "POST required", http.StatusMethodNotAllowed)
 		return
@@ -697,7 +1030,7 @@ func (cfg Config) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config, err := classroom.OAuthConfigFromFile(cfg.CredsFile)
+	config, err := classroom.OAuthConfigFromFile(s.credsFile)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("loading credentials: %v", err), http.StatusInternalServerError)
 		return
@@ -709,7 +1042,7 @@ func (cfg Config) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := classroom.SaveToken(cfg.TokenFile, tok); err != nil {
+	if err := classroom.SaveToken(s.tokenFile, tok); err != nil {
 		jsonError(w, fmt.Sprintf("saving token: %v", err), http.StatusInternalServerError)
 		return
 	}

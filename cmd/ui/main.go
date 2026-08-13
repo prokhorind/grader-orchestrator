@@ -3,10 +3,13 @@
 //
 // Usage:
 //
-//	grade-ui \
-//	  -workspace /path/to/grader-orchestrator \
-//	  -mcp-root  /path/to/google-classroom-mcp \
-//	  -port      8080
+//	grade-ui -workspace /path/to/grader-orchestrator
+//
+// Credentials and token are stored in the OS default config directory
+// (~/.config/classroom-grader/ on Linux/macOS,
+// %AppData%\classroom-grader\ on Windows).
+// You can override them with -credentials / -token or the corresponding
+// environment variables if needed.
 package main
 
 import (
@@ -14,7 +17,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -23,26 +25,26 @@ import (
 )
 
 func main() {
-	workspaceFlag := flag.String("workspace", "", "Root directory containing prompts/ and submissions/ (required)")
-	mcpRootFlag := flag.String("mcp-root", "", "google-classroom-mcp project root — credentials and token loaded from <mcp-root>/.secrets/")
-	credsFlag := flag.String("credentials", "", "Path to Google OAuth2 credentials.json (overrides GOOGLE_CREDENTIALS_FILE)")
-	tokenFlag := flag.String("token", "", "Path to cached OAuth2 token.json (overrides GOOGLE_TOKEN_FILE)")
+	workspaceFlag := flag.String("workspace", "", "Root directory for submissions and marks (optional, defaults to ~/Documents/classroom-grader)")
+	credsFlag := flag.String("credentials", "", "Path to Google OAuth2 credentials.json (overrides GOOGLE_CREDENTIALS_FILE and default OS path)")
+	tokenFlag := flag.String("token", "", "Path to cached OAuth2 token.json (overrides GOOGLE_TOKEN_FILE and default OS path)")
 	lmURLFlag := flag.String("lm-url", "http://localhost:1234/v1", "LM Studio API base URL")
 	portFlag := flag.Int("port", 8080, "HTTP port to listen on")
 	flag.Parse()
 
-	if *workspaceFlag == "" {
-		fmt.Fprintln(os.Stderr, "Error: -workspace is required")
-		flag.Usage()
-		os.Exit(1)
+	workspacePath := *workspaceFlag
+	if workspacePath == "" {
+		workspacePath = classroom.DefaultWorkspacePath()
 	}
 
-	workspace, err := filepath.Abs(*workspaceFlag)
+	workspace, err := filepath.Abs(workspacePath)
 	if err != nil {
 		log.Fatalf("resolving workspace path: %v", err)
 	}
 
-	creds, token, err := classroom.ResolveCredentialsAndTokenPaths(*credsFlag, *tokenFlag, *mcpRootFlag)
+	// Resolve credential paths: explicit flags → env vars → OS default config dir.
+	// -mcp-root is no longer needed; credentials are managed through the web UI.
+	creds, token, err := classroom.ResolveCredentialsAndTokenPaths(*credsFlag, *tokenFlag, "")
 	if err != nil {
 		log.Fatalf("resolving credentials and token paths: %v", err)
 	}
@@ -58,6 +60,8 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", *portFlag)
 	log.Printf("Grader UI → http://localhost%s", addr)
+	log.Printf("Credentials  → %s", creds)
+	log.Printf("Token        → %s", token)
 
 	srv := &http.Server{
 		Addr:         addr,
@@ -69,13 +73,4 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server: %v", err)
 	}
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

@@ -114,7 +114,15 @@ func main() {
 	}
 
 	// ── Write marks.json ──────────────────────────────────────────────────────
-	outPath, err := grader.WriteMarks(workspace, courseID, *assignmentFlag, marks)
+	// Use the version from the first submission if available, otherwise now.
+	timestamp := ""
+	if len(submissions) > 0 {
+		timestamp = submissions[0].Version
+	}
+	if timestamp == "" {
+		timestamp = time.Now().Local().Format("2006-01-02T15-04-05")
+	}
+	outPath, err := grader.WriteMarks(workspace, courseID, *assignmentFlag, timestamp, marks)
 	if err != nil {
 		log.Fatalf("writing marks: %v", err)
 	}

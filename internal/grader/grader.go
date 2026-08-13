@@ -227,27 +227,77 @@ func parseMark(reply, fallbackName, fallbackID string) (Mark, error) {
 	return m, nil
 }
 
-// WriteMarks serialises marks to marks.json inside the assignment submission folder.
-// Path: <workspaceRoot>/submissions/<courseID>/<assignmentTitle>/marks.json
-func WriteMarks(workspaceRoot, courseID, assignmentTitle string, marks []Mark) (string, error) {
-	// Sort by student name for deterministic output
-	sort.Slice(marks, func(i, j int) bool {
-		return marks[i].StudentName < marks[j].StudentName
-	})
-
-	dir := filepath.Join(workspaceRoot, "submissions", courseID, classroom.Sanitize(assignmentTitle))
+// WriteMarks serialises marks to marks.json inside the timestamp directory.
+// Path: <workspaceRoot>/submissions/<courseID>/<assignmentTitle>/<timestamp>/marks.json
+//
+// Merge behaviour: if marks.json already exists for that timestamp (e.g. a partial
+// re-grade), the incoming marks replace matching students (by StudentName) and all
+// other existing entries are kept. This lets you re-grade a subset without wiping
+// the rest.
+func WriteMarks(workspaceRoot, courseID, assignmentTitle, timestamp string, marks []Mark) (string, error) {
+	dir := filepath.Join(workspaceRoot, "submissions",
+		classroom.Sanitize(courseID),
+		classroom.Sanitize(assignmentTitle),
+		timestamp)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("creating output dir: %w", err)
 	}
 
 	outPath := filepath.Join(dir, "marks.json")
-	data, err := json.MarshalIndent(marks, "", "  ")
+
+	// Merge with any existing marks for this timestamp.
+	merged := mergeMarks(outPath, marks)
+
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].StudentName < merged[j].StudentName
+	})
+
+	data, err := json.MarshalIndent(merged, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshalling marks: %w", err)
 	}
-
 	if err := os.WriteFile(outPath, data, 0644); err != nil {
 		return "", fmt.Errorf("writing marks.json: %w", err)
 	}
 	return outPath, nil
+}
+
+// mergeMarks reads existing marks from path (if it exists) and overlays incoming
+// marks on top, matching by StudentName. Students not present in incoming are kept.
+func mergeMarks(path string, incoming []Mark) []Mark {
+	existing := readMarksFile(path)
+
+	// Index existing by name for O(1) replacement.
+	byName := make(map[string]Mark, len(existing))
+	for _, m := range existing {
+		byName[m.StudentName] = m
+	}
+	// Overlay incoming.
+	for _, m := range incoming {
+		byName[m.StudentName] = m
+	}
+
+	merged := make([]Mark, 0, len(byName))
+	for _, m := range byName {
+		merged = append(merged, m)
+	}
+	return merged
+}
+
+// ReadMarksFile reads a marks.json file and returns its contents, or nil on error.
+func ReadMarksFile(path string) []Mark {
+	return readMarksFile(path)
+}
+
+// readMarksFile is the internal version used by WriteMarks.
+func readMarksFile(path string) []Mark {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var marks []Mark
+	if err := json.Unmarshal(data, &marks); err != nil {
+		return nil
+	}
+	return marks
 }

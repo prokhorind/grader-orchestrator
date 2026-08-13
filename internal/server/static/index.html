@@ -10,6 +10,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 header{background:#1a1d27;border-bottom:1px solid #2d3148;padding:16px 24px;display:flex;align-items:center;gap:12px}
 header h1{font-size:1.25rem;font-weight:600;color:#a78bfa}
 header span{font-size:.8rem;color:#64748b;background:#12141e;padding:2px 8px;border-radius:4px}
+.header-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.workspace-pill{font-size:.75rem;color:#64748b;background:#12141e;padding:3px 10px;border-radius:4px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:default}
+.gear-btn{background:none;border:1px solid #2d3148;border-radius:6px;color:#64748b;padding:5px 8px;font-size:.9rem;line-height:1;cursor:pointer;transition:all .15s}
+.gear-btn:hover{border-color:#a78bfa;color:#a78bfa}
+.settings-panel{background:#1a1d27;border-bottom:1px solid #2d3148;padding:16px 24px;display:none;flex-direction:column;gap:12px}
+.settings-panel.open{display:flex}
+.settings-row{display:flex;align-items:center;gap:10px}
+.settings-row label{font-size:.8rem;color:#94a3b8;white-space:nowrap;width:140px;flex-shrink:0}
+.settings-row input[type=text]{flex:1;max-width:480px}
+.settings-row .hint{font-size:.72rem;color:#475569;white-space:nowrap}
+.settings-row .s-saved{font-size:.75rem;color:#c4b5fd;background:#1a1428;border:1px solid #a78bfa44;border-radius:12px;padding:2px 10px;display:flex;align-items:center;gap:6px}
+.settings-row .s-saved .clear-btn{background:none;border:none;color:#f87171;cursor:pointer;padding:0 2px;font-size:.85rem;line-height:1}
 .tabs{display:flex;gap:0;border-bottom:1px solid #2d3148;background:#1a1d27;padding:0 24px}
 .tab{padding:12px 20px;cursor:pointer;font-size:.875rem;color:#64748b;border-bottom:2px solid transparent;transition:all .15s}
 .tab:hover{color:#a78bfa}
@@ -136,7 +148,30 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
 <header>
   <h1>&#127979; Classroom Grader</h1>
   <span>local LM Studio</span>
+  <div class="header-right">
+    <span class="workspace-pill" id="workspace-pill" title="Submissions folder">&#128193; …</span>
+    <button class="gear-btn" onclick="toggleSettings()" title="Settings">&#9881;</button>
+  </div>
 </header>
+
+<div class="settings-panel" id="settings-panel">
+  <div class="settings-row">
+    <label>Submissions folder</label>
+    <input type="text" id="workspace-input" placeholder="/path/to/workspace" />
+    <button class="primary" onclick="saveWorkspace()">Save</button>
+    <span class="hint" id="workspace-hint"></span>
+  </div>
+  <div class="settings-row">
+    <label>LM Studio URL</label>
+    <input type="text" id="lmurl-input" placeholder="http://localhost:1234/v1" />
+    <button class="primary" onclick="saveLMURL()">Save</button>
+    <span class="hint" id="lmurl-hint"></span>
+  </div>
+  <div class="settings-row">
+    <label>Grading rules</label>
+    <div id="settings-rules-status" style="color:#475569;font-size:.8rem">No rules cached</div>
+  </div>
+</div>
 
 <div class="tabs">
   <div class="tab active" data-tab="fetch">Fetch &amp; Grade</div>
@@ -266,6 +301,9 @@ let selectedTs = '';
 
 // ── Init: called from the bottom of the last script block once all functions are defined ──
 async function init() {
+  // Load workspace path into header
+  await loadWorkspace();
+
   // Check auth first
   const isAuth = await checkAuthStatus();
   if (isAuth) {
@@ -298,24 +336,26 @@ async function checkAuthStatus() {
     if (!status.credentials_exists) {
       authPanel.style.display = 'block';
       authPanel.innerHTML = `
-        <h2>🔑 Google Credentials Missing</h2>
-        <p>To fetch courses and assignments from Google Classroom, you need to configure your Google OAuth2 credentials.</p>
+        <h2>🔑 Google Credentials Required</h2>
+        <p>Upload your Google OAuth2 credentials file to get started. It will be saved once and reused on future runs.</p>
         <div class="steps">
           <div class="step">
-            <div class="step-title">1. Download credentials.json</div>
+            <div class="step-title">1. Create a credentials.json</div>
             <p style="margin-bottom:8px">Go to the <a href="https://console.cloud.google.com/" target="_blank" style="color:#a78bfa">Google Cloud Console</a>, enable the <strong>Google Classroom API</strong> and <strong>Google Drive API</strong>, create an <strong>OAuth 2.0 Client ID</strong> (Desktop app), and download the JSON file.</p>
           </div>
           <div class="step">
-            <div class="step-title">2. Save credentials.json to:</div>
-            <code style="display:block;padding:8px 12px;margin:8px 0;word-break:break-all;">${escHtml(status.credentials_path)}</code>
-          </div>
-          <div class="step">
-            <button class="primary" style="align-self:flex-start" onclick="checkAuthStatus()">🔄 I've placed the file, check again</button>
+            <div class="step-title">2. Upload credentials.json</div>
+            <p style="margin-bottom:8px">The file will be saved to: <code style="word-break:break-all">${escHtml(status.credentials_path)}</code></p>
+            <div class="auth-code-input">
+              <input type="file" id="creds-file-input" accept=".json,application/json" style="flex:1" />
+              <button class="primary" id="upload-creds-btn" onclick="uploadCredentials()">Upload</button>
+            </div>
+            <div id="upload-creds-error" style="color:#f87171;font-size:.8rem;margin-top:6px;display:none"></div>
           </div>
         </div>
       `;
       courseSel.disabled = true;
-      courseSel.innerHTML = '<option value="">— setup credentials first —</option>';
+      courseSel.innerHTML = '<option value="">— upload credentials first —</option>';
       fetchBtn.disabled = true;
       return false;
     }
@@ -355,6 +395,35 @@ async function checkAuthStatus() {
   } catch(e) {
     addLog('f', '⚠ Error checking auth status: ' + e.message, 'err');
     return false;
+  }
+}
+
+async function uploadCredentials() {
+  const input = document.getElementById('creds-file-input');
+  const errEl = document.getElementById('upload-creds-error');
+  const btn = document.getElementById('upload-creds-btn');
+
+  if (!input || !input.files.length) {
+    if (errEl) { errEl.textContent = 'Please select a credentials.json file first.'; errEl.style.display = 'block'; }
+    return;
+  }
+
+  btn.disabled = true;
+  if (errEl) errEl.style.display = 'none';
+
+  const fd = new FormData();
+  fd.append('credentials', input.files[0]);
+
+  try {
+    const resp = await fetch('/api/upload-credentials', { method: 'POST', body: fd });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || resp.statusText);
+
+    // Credentials saved — re-check auth status to proceed to the OAuth step
+    await checkAuthStatus();
+  } catch(e) {
+    if (errEl) { errEl.textContent = 'Upload failed: ' + e.message; errEl.style.display = 'block'; }
+    btn.disabled = false;
   }
 }
 
@@ -515,6 +584,7 @@ function onRulesFileChange(prefix) {
     try {
       localStorage.setItem(RULES_KEY, JSON.stringify({ name: file.name, content: reader.result }));
       renderSavedRulesIndicator(prefix);
+      renderSettingsRulesStatus();
     } catch(e) { console.warn('Could not save rules to localStorage', e); }
   };
   reader.readAsText(file);
@@ -740,6 +810,126 @@ async function apiFetch(url) {
   const j = await r.json();
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
+}
+
+// ── Settings panel ────────────────────────────────────────────────────────────
+
+async function loadSettings() {
+  // Workspace
+  try {
+    const data = await apiFetch('/api/workspace');
+    document.getElementById('workspace-input').value = data.workspace;
+    document.getElementById('workspace-pill').textContent = '📁 ' + data.workspace;
+    document.getElementById('workspace-pill').title = data.workspace;
+  } catch(e) { console.warn('Could not load workspace:', e); }
+
+  // LM Studio URL
+  try {
+    const data = await apiFetch('/api/lm-url');
+    document.getElementById('lmurl-input').value = data.lm_url;
+  } catch(e) { console.warn('Could not load LM URL:', e); }
+
+  // Grading rules cache status
+  renderSettingsRulesStatus();
+}
+
+// kept for back-compat (called from init)
+async function loadWorkspace() { await loadSettings(); }
+
+function toggleSettings() {
+  const panel = document.getElementById('settings-panel');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open')) renderSettingsRulesStatus();
+}
+
+async function saveWorkspace() {
+  const input = document.getElementById('workspace-input');
+  const hint = document.getElementById('workspace-hint');
+  const path = input.value.trim();
+  if (!path) { hint.textContent = 'Path cannot be empty.'; hint.style.color = '#f87171'; return; }
+
+  try {
+    const resp = await fetch('/api/workspace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: path })
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || resp.statusText);
+
+    input.value = result.workspace;
+    document.getElementById('workspace-pill').textContent = '📁 ' + result.workspace;
+    document.getElementById('workspace-pill').title = result.workspace;
+    hint.textContent = 'Saved!';
+    hint.style.color = '#34d399';
+    setTimeout(() => { hint.textContent = ''; }, 2000);
+    await reloadLocalAssignments();
+  } catch(e) {
+    hint.textContent = 'Error: ' + e.message;
+    hint.style.color = '#f87171';
+  }
+}
+
+async function saveLMURL() {
+  const input = document.getElementById('lmurl-input');
+  const hint = document.getElementById('lmurl-hint');
+  const url = input.value.trim();
+  if (!url) { hint.textContent = 'URL cannot be empty.'; hint.style.color = '#f87171'; return; }
+
+  try {
+    const resp = await fetch('/api/lm-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lm_url: url })
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || resp.statusText);
+
+    input.value = result.lm_url;
+    hint.textContent = 'Saved!';
+    hint.style.color = '#34d399';
+    setTimeout(() => { hint.textContent = ''; }, 2000);
+  } catch(e) {
+    hint.textContent = 'Error: ' + e.message;
+    hint.style.color = '#f87171';
+  }
+}
+
+function renderSettingsRulesStatus() {
+  const el = document.getElementById('settings-rules-status');
+  if (!el) return;
+  const saved = getSavedRules();
+  if (saved) {
+    el.innerHTML = `<span class="s-saved">💾 ${escHtml(saved.name)}
+      <button class="clear-btn" onclick="clearAllRules()" title="Clear cached rules">✕</button>
+    </span>`;
+  } else {
+    el.innerHTML = '<span style="color:#475569;font-size:.8rem">No rules cached</span>';
+  }
+}
+
+function clearAllRules() {
+  localStorage.removeItem(RULES_KEY);
+  // Also clear the per-tab indicators
+  ['f', 'r'].forEach(p => {
+    const el = document.getElementById(p + '-rules-saved');
+    if (el) el.style.display = 'none';
+  });
+  renderSettingsRulesStatus();
+}
+
+async function reloadLocalAssignments() {
+  try {
+    const assigns = await apiFetch('/api/local-assignments');
+    const sel = document.getElementById('r-assignment');
+    sel.innerHTML = '<option value="">— select assignment —</option>';
+    assigns.forEach(a => {
+      const o = document.createElement('option');
+      o.value = JSON.stringify(a);
+      o.textContent = a.course_id + ' / ' + a.assignment_name;
+      sel.appendChild(o);
+    });
+  } catch(e) { /* non-fatal */ }
 }
 
 // Run after all functions are defined

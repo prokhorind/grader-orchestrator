@@ -129,7 +129,7 @@ func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, http
 		return nil, fmt.Errorf("creating drive service: %w", err)
 	}
 
-	timestamp := time.Now().UTC().Format("2006-01-02T15-04-05")
+	timestamp := time.Now().Local().Format("2006-01-02T15-04-05")
 	var submissions []Submission
 
 	log.Printf("[get_submissions] starting download: course=%s assignment=%q dir=%s", courseID, assignmentTitle, baseDir)
@@ -151,7 +151,11 @@ func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, http
 					continue
 				}
 
-				versionDir := filepath.Join(baseDir, Sanitize(courseFolderName), Sanitize(assignmentTitle), sub.UserId, timestamp)
+				studentDir := sub.UserId
+				if profile.FullName != "" {
+					studentDir = Sanitize(profile.FullName)
+				}
+				versionDir := filepath.Join(baseDir, Sanitize(courseFolderName), Sanitize(assignmentTitle), studentDir, timestamp)
 				if err := os.MkdirAll(versionDir, 0755); err != nil {
 					return err
 				}

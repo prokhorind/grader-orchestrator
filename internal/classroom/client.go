@@ -36,12 +36,31 @@ func OAuthConfigFromFile(credentialsFile string) (*oauth2.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading credentials file %s: %w", credentialsFile, err)
 	}
+	return OAuthConfigFromBytes(data)
+}
+
+// OAuthConfigFromBytes parses OAuth2 client credentials from raw JSON bytes.
+func OAuthConfigFromBytes(data []byte) (*oauth2.Config, error) {
 	config, err := google.ConfigFromJSON(data, scopes...)
 	if err != nil {
-		return nil, fmt.Errorf("parsing credentials file: %w", err)
+		return nil, fmt.Errorf("parsing credentials: %w", err)
 	}
 	config.RedirectURL = "urn:ietf:wg:oauth:2.0:oob"
 	return config, nil
+}
+
+// DefaultWorkspacePath returns the default directory used to store submissions
+// and marks. It follows OS conventions:
+//   - macOS/Linux: ~/Documents/classroom-grader
+//   - Windows:     %USERPROFILE%\Documents\classroom-grader
+//
+// Falls back to ~/classroom-grader if the Documents folder cannot be resolved.
+func DefaultWorkspacePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "classroom-grader" // last-resort relative path
+	}
+	return filepath.Join(home, "Documents", "classroom-grader")
 }
 
 // DefaultConfigPaths returns the default paths for credentials.json and token.json
@@ -151,7 +170,7 @@ func NewService(ctx context.Context, credentialsFile, tokenFile string) (*google
 		return nil, nil, err
 	}
 
-	tok, err := loadToken(tokenFile)
+	tok, err := LoadToken(tokenFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("no token found at %s — run standard authorization flow first: %w", tokenFile, err)
 	}
@@ -164,7 +183,8 @@ func NewService(ctx context.Context, credentialsFile, tokenFile string) (*google
 	return svc, httpClient, nil
 }
 
-func loadToken(path string) (*oauth2.Token, error) {
+// LoadToken reads an OAuth2 token from the given file path.
+func LoadToken(path string) (*oauth2.Token, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
