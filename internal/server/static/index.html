@@ -147,7 +147,7 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
 
 <header>
   <h1>&#127979; Classroom Grader</h1>
-  <span>local LM Studio</span>
+  <span id="backend-label">local LM Studio</span>
   <div class="header-right">
     <span class="workspace-pill" id="workspace-pill" title="Submissions folder">&#128193; …</span>
     <button class="gear-btn" onclick="toggleSettings()" title="Settings">&#9881;</button>
@@ -166,6 +166,29 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
     <input type="text" id="lmurl-input" placeholder="http://localhost:1234/v1" />
     <button class="primary" onclick="saveLMURL()">Save</button>
     <span class="hint" id="lmurl-hint"></span>
+  </div>
+  <div class="settings-row">
+    <label>LLM Backend</label>
+    <select id="llm-backend-select" onchange="saveBackend()">
+      <option value="lmstudio">LM Studio (local)</option>
+      <option value="gemini">Google Gemini (cloud)</option>
+    </select>
+    <span class="hint" id="backend-hint"></span>
+  </div>
+  <div id="gemini-settings" style="display:none">
+    <div class="settings-row">
+      <label>Gemini API Key</label>
+      <input type="password" id="gemini-key-input" placeholder="AIza…" autocomplete="off" />
+      <button class="primary" onclick="saveGeminiConfig()">Save</button>
+      <span class="hint" id="gemini-hint"></span>
+    </div>
+    <div class="settings-row">
+      <label>Gemini Model</label>
+      <select id="gemini-model-select" style="flex:1" onchange="persistGeminiModel(this.value)">
+        <option value="">— save API key first —</option>
+      </select>
+      <button class="primary" onclick="loadGeminiModels()" title="Refresh model list">↻</button>
+    </div>
   </div>
   <div class="settings-row">
     <label>Grading rules</label>
@@ -829,7 +852,20 @@ async function loadSettings() {
     document.getElementById('lmurl-input').value = data.lm_url;
   } catch(e) { console.warn('Could not load LM URL:', e); }
 
-  // Grading rules cache status
+  // LLM backend + Gemini config
+  try {
+    const data = await apiFetch('/api/llm-backend');
+    const sel = document.getElementById('llm-backend-select');
+    sel.value = data.backend;
+    updateBackendUI(data.backend);
+  } catch(e) { console.warn('Could not load LLM backend:', e); }
+
+  try {
+    const data = await apiFetch('/api/gemini-config');
+    if (data.api_key) document.getElementById('gemini-key-input').placeholder = data.api_key; // show masked
+    // Populate model dropdown; pre-select whatever is already saved
+    await loadGeminiModels(data.model);
+  } catch(e) { /* non-fatal */ }
   renderSettingsRulesStatus();
 }
 
@@ -888,6 +924,129 @@ async function saveLMURL() {
     input.value = result.lm_url;
     hint.textContent = 'Saved!';
     hint.style.color = '#34d399';
+    setTimeout(() => { hint.textContent = ''; }, 2000);
+  } catch(e) {
+    hint.textContent = 'Error: ' + e.message;
+    hint.style.color = '#f87171';
+  }
+}
+
+function updateBackendUI(backend) {
+  const geminiSection = document.getElementById('gemini-settings');
+  const lmurlRow = document.getElementById('lmurl-input').closest('.settings-row');
+  const label = document.getElementById('backend-label');
+  if (backend === 'gemini') {
+    geminiSection.style.display = '';
+    lmurlRow.style.display = 'none';
+    if (label) label.textContent = 'Google Gemini';
+    // Eagerly load models if the section just became visible
+    loadGeminiModels();
+  } else {
+    geminiSection.style.display = 'none';
+    lmurlRow.style.display = '';
+    if (label) label.textContent = 'local LM Studio';
+  }
+}
+
+// loadGeminiModels fetches the live model list from /api/gemini-models and
+// populates the select. Pass an optional preselect string to restore a saved value.
+// After populating, always persists the final selected value back to the server.
+async function loadGeminiModels(preselect) {
+  const sel = document.getElementById('gemini-model-select');
+  sel.innerHTML = '<option value="">— loading… —</option>';
+  try {
+    const models = await apiFetch('/api/gemini-models');
+    sel.innerHTML = '';
+    if (!models || models.length === 0) {
+      sel.innerHTML = '<option value="">— no models found —</option>';
+      return;
+    }
+    models.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m.short_name;
+      o.textContent = m.display_name ? `${m.display_name} (${m.short_name})` : m.short_name;
+      sel.appendChild(o);
+    });
+    // Restore previously selected model if present in the list
+    if (preselect) {
+      sel.value = preselect;
+      // If exact match failed try prefix match (e.g. saved "gemini-2.5-flash-latest")
+      if (!sel.value) {
+        for (const o of sel.options) {
+          if (o.value.startsWith(preselect) || preselect.startsWith(o.value)) {
+            sel.value = o.value; break;
+          }
+        }
+      }
+    }
+    // Always persist the now-selected model so the server is in sync
+    if (sel.value) await persistGeminiModel(sel.value);
+  } catch(e) {
+    sel.innerHTML = `<option value="">— ${e.message} —</option>`;
+  }
+}
+
+// persistGeminiModel saves only the model field to the server (no API key change).
+async function persistGeminiModel(model) {
+  if (!model) return;
+  try {
+    await fetch('/api/gemini-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model })
+    });
+  } catch(e) { console.warn('Could not persist Gemini model:', e); }
+}
+
+async function saveBackend() {
+  const sel = document.getElementById('llm-backend-select');
+  const hint = document.getElementById('backend-hint');
+  const backend = sel.value;
+
+  try {
+    const resp = await fetch('/api/llm-backend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend })
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || resp.statusText);
+
+    updateBackendUI(backend);
+    hint.textContent = 'Switched!';
+    hint.style.color = '#34d399';
+    setTimeout(() => { hint.textContent = ''; }, 2000);
+  } catch(e) {
+    hint.textContent = 'Error: ' + e.message;
+    hint.style.color = '#f87171';
+  }
+}
+
+async function saveGeminiConfig() {
+  const keyInput = document.getElementById('gemini-key-input');
+  const modelSel = document.getElementById('gemini-model-select');
+  const hint = document.getElementById('gemini-hint');
+  const apiKey = keyInput.value.trim();
+  const model = modelSel.value;
+
+  if (!apiKey) { hint.textContent = 'API key cannot be empty.'; hint.style.color = '#f87171'; return; }
+
+  try {
+    const resp = await fetch('/api/gemini-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey, model: model || '' })
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || resp.statusText);
+
+    keyInput.value = '';
+    keyInput.placeholder = '••••••••••••••• (saved)';
+    hint.textContent = 'Saved! Loading models…';
+    hint.style.color = '#34d399';
+    // Reload model list with the freshly-saved key
+    await loadGeminiModels(model);
+    hint.textContent = 'Saved!';
     setTimeout(() => { hint.textContent = ''; }, 2000);
   } catch(e) {
     hint.textContent = 'Error: ' + e.message;

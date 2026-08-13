@@ -1,5 +1,6 @@
 // Package lmstudio provides a minimal OpenAI-compatible client for LM Studio's
 // local inference server (default: http://localhost:1234/v1).
+// It implements llm.Client so it can be used interchangeably with other backends.
 package lmstudio
 
 import (
@@ -10,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/prokhorind/classroom-grader/internal/llm"
 )
 
 // Client talks to LM Studio's /v1/chat/completions endpoint.
@@ -35,24 +38,25 @@ func NewClient(baseURL, model string, timeout time.Duration) *Client {
 	}
 }
 
-// Message is a single chat message.
-type Message struct {
+// wireMessage is the JSON shape sent to /v1/chat/completions.
+// We keep this internal so the public API uses the shared llm.Message type.
+type wireMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
 // chatRequest is the JSON body sent to /v1/chat/completions.
 type chatRequest struct {
-	Model       string    `json:"model,omitempty"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature"`
-	Stream      bool      `json:"stream"`
+	Model       string        `json:"model,omitempty"`
+	Messages    []wireMessage `json:"messages"`
+	Temperature float64       `json:"temperature"`
+	Stream      bool          `json:"stream"`
 }
 
 // chatResponse is the subset of the OpenAI response we care about.
 type chatResponse struct {
 	Choices []struct {
-		Message Message `json:"message"`
+		Message wireMessage `json:"message"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -60,10 +64,16 @@ type chatResponse struct {
 }
 
 // Complete sends messages to LM Studio and returns the assistant reply text.
-func (c *Client) Complete(ctx context.Context, messages []Message) (string, error) {
+// It implements llm.Client.
+func (c *Client) Complete(ctx context.Context, messages []llm.Message) (string, error) {
+	wire := make([]wireMessage, len(messages))
+	for i, m := range messages {
+		wire[i] = wireMessage{Role: m.Role, Content: m.Content}
+	}
+
 	reqBody := chatRequest{
 		Model:       c.model,
-		Messages:    messages,
+		Messages:    wire,
 		Temperature: 0.1, // low temp for deterministic grading
 		Stream:      false,
 	}
@@ -109,3 +119,8 @@ func (c *Client) Complete(ctx context.Context, messages []Message) (string, erro
 
 	return result.Choices[0].Message.Content, nil
 }
+
+// Ensure Client implements the llm.Client interface at compile time.
+var _ interface {
+	Complete(ctx context.Context, messages []llm.Message) (string, error)
+} = (*Client)(nil)

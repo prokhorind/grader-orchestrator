@@ -17,27 +17,35 @@ import (
 	"time"
 
 	"github.com/prokhorind/classroom-grader/internal/classroom"
+	"github.com/prokhorind/classroom-grader/internal/gemini"
 	"github.com/prokhorind/classroom-grader/internal/grader"
+	"github.com/prokhorind/classroom-grader/internal/llm"
 	"github.com/prokhorind/classroom-grader/internal/lmstudio"
 	"golang.org/x/oauth2"
 )
 
 // Config holds the server-level configuration resolved at startup.
 type Config struct {
-	Workspace   string
-	CredsFile   string
-	TokenFile   string
-	LMStudioURL string
+	Workspace    string
+	CredsFile    string
+	TokenFile    string
+	LMStudioURL  string
+	LLMBackend   string // "lmstudio" (default) or "gemini"
+	GeminiAPIKey string
+	GeminiModel  string
 }
 
 // srv is the internal handler type that owns mutable state.
 // All exported behaviour is wired through New() which returns http.Handler.
 type srv struct {
-	mu          sync.RWMutex
-	workspace   string // mutable — can be changed via /api/workspace
-	credsFile   string
-	tokenFile   string
-	lmStudioURL string
+	mu           sync.RWMutex
+	workspace    string // mutable — can be changed via /api/workspace
+	credsFile    string
+	tokenFile    string
+	lmStudioURL  string // mutable — can be changed via /api/lm-url
+	llmBackend   string // mutable — "lmstudio" or "gemini"
+	geminiAPIKey string // mutable — can be changed via /api/gemini-config
+	geminiModel  string // mutable
 }
 
 // getWorkspace returns the current workspace path under a read lock.
@@ -56,11 +64,18 @@ func (s *srv) setWorkspace(path string) {
 
 // New wires up all HTTP routes and returns the handler.
 func New(cfg Config) http.Handler {
+	backend := cfg.LLMBackend
+	if backend == "" {
+		backend = "lmstudio"
+	}
 	s := &srv{
-		workspace:   cfg.Workspace,
-		credsFile:   cfg.CredsFile,
-		tokenFile:   cfg.TokenFile,
-		lmStudioURL: cfg.LMStudioURL,
+		workspace:    cfg.Workspace,
+		credsFile:    cfg.CredsFile,
+		tokenFile:    cfg.TokenFile,
+		lmStudioURL:  cfg.LMStudioURL,
+		llmBackend:   backend,
+		geminiAPIKey: cfg.GeminiAPIKey,
+		geminiModel:  cfg.GeminiModel,
 	}
 
 	mux := http.NewServeMux()
@@ -81,6 +96,9 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("/api/auth-exchange", s.handleAuthExchange)
 	mux.HandleFunc("/api/workspace", s.handleWorkspace)
 	mux.HandleFunc("/api/lm-url", s.handleLMURL)
+	mux.HandleFunc("/api/llm-backend", s.handleLLMBackend)
+	mux.HandleFunc("/api/gemini-config", s.handleGeminiConfig)
+	mux.HandleFunc("/api/gemini-models", s.handleGeminiModels)
 	mux.HandleFunc("/api/courses", s.handleCourses)
 	mux.HandleFunc("/api/assignments", s.handleAssignments)
 	mux.HandleFunc("/api/students", s.handleStudents)
@@ -149,6 +167,41 @@ func (s *srv) setLMStudioURL(url string) {
 	s.lmStudioURL = url
 }
 
+// getLLMBackend returns the active backend name under a read lock.
+func (s *srv) getLLMBackend() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.llmBackend
+}
+
+// getGeminiConfig returns the Gemini API key and model under a read lock.
+func (s *srv) getGeminiConfig() (apiKey, model string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.geminiAPIKey, s.geminiModel
+}
+
+// buildLLMClient constructs the active LLM client from current server config.
+func (s *srv) buildLLMClient(timeout time.Duration) (llm.Client, error) {
+	backend := s.getLLMBackend()
+	switch backend {
+	case "gemini":
+		apiKey, model := s.getGeminiConfig()
+		if apiKey == "" {
+			return nil, fmt.Errorf("Gemini API key is not configured — set it in Settings")
+		}
+		if model == "" {
+			return nil, fmt.Errorf("Gemini model is not selected — pick one from the model list in Settings")
+		}
+		return gemini.NewClient(apiKey, model, timeout), nil
+	default: // "lmstudio"
+		s.mu.RLock()
+		url := s.lmStudioURL
+		s.mu.RUnlock()
+		return lmstudio.NewClient(url, "", timeout), nil
+	}
+}
+
 // ── API: /api/lm-url ──────────────────────────────────────────────────────────
 
 type lmURLResponse struct {
@@ -178,6 +231,104 @@ func (s *srv) handleLMURL(w http.ResponseWriter, r *http.Request) {
 	default:
 		jsonError(w, "GET or POST required", http.StatusMethodNotAllowed)
 	}
+}
+
+// ── API: /api/llm-backend ─────────────────────────────────────────────────────
+
+type llmBackendResponse struct {
+	Backend string `json:"backend"` // "lmstudio" or "gemini"
+}
+
+// handleLLMBackend handles GET (read active backend) and POST (switch backend).
+func (s *srv) handleLLMBackend(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, llmBackendResponse{Backend: s.getLLMBackend()})
+
+	case http.MethodPost:
+		var req llmBackendResponse
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Backend != "lmstudio" && req.Backend != "gemini" {
+			jsonError(w, `backend must be "lmstudio" or "gemini"`, http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		s.llmBackend = req.Backend
+		s.mu.Unlock()
+		log.Printf("[llm-backend] switched to %s", req.Backend)
+		jsonOK(w, llmBackendResponse{Backend: req.Backend})
+
+	default:
+		jsonError(w, "GET or POST required", http.StatusMethodNotAllowed)
+	}
+}
+
+// ── API: /api/gemini-config ───────────────────────────────────────────────────
+
+type geminiConfigResponse struct {
+	APIKey string `json:"api_key"`
+	Model  string `json:"model"`
+}
+
+// handleGeminiConfig handles GET (read config, key masked) and POST (update).
+func (s *srv) handleGeminiConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		apiKey, model := s.getGeminiConfig()
+		masked := ""
+		if len(apiKey) > 8 {
+			masked = apiKey[:4] + strings.Repeat("*", len(apiKey)-8) + apiKey[len(apiKey)-4:]
+		} else if apiKey != "" {
+			masked = strings.Repeat("*", len(apiKey))
+		}
+		jsonOK(w, geminiConfigResponse{APIKey: masked, Model: model})
+
+	case http.MethodPost:
+		var req geminiConfigResponse
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		if req.APIKey != "" {
+			s.geminiAPIKey = req.APIKey
+		}
+		if req.Model != "" {
+			s.geminiModel = req.Model
+		}
+		s.mu.Unlock()
+		log.Printf("[gemini-config] updated (model=%s)", req.Model)
+		jsonOK(w, map[string]string{"status": "ok"})
+
+	default:
+		jsonError(w, "GET or POST required", http.StatusMethodNotAllowed)
+	}
+}
+
+// ── API: /api/gemini-models ───────────────────────────────────────────────────
+
+// handleGeminiModels returns all Gemini models that support generateContent,
+// fetched live from the API using the currently configured API key.
+// GET only; returns 400 if no API key is set.
+func (s *srv) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	apiKey, _ := s.getGeminiConfig()
+	if apiKey == "" {
+		jsonError(w, "Gemini API key is not configured — set it in Settings first", http.StatusBadRequest)
+		return
+	}
+	models, err := gemini.ListModels(r.Context(), apiKey)
+	if err != nil {
+		jsonError(w, "listing Gemini models: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, models)
 }
 
 // ── API: /api/courses ─────────────────────────────────────────────────────────
@@ -436,7 +587,13 @@ func (s *srv) handleGrade(w http.ResponseWriter, r *http.Request) {
 	workspace := s.getWorkspace()
 	credsFile := s.credsFile
 	tokenFile := s.tokenFile
-	lmStudioURL := s.getLMStudioURL()
+
+	const defaultTimeout = 5 * time.Minute
+	llmClient, err := s.buildLLMClient(defaultTimeout)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	sseStream(w, func(send func(string)) {
 		defer cleanup()
@@ -461,7 +618,7 @@ func (s *srv) handleGrade(w http.ResponseWriter, r *http.Request) {
 		}
 		send(logEvent(fmt.Sprintf("Downloaded %d submissions", len(subs))))
 
-		marks, err := runGrader(ctx, workspace, lmStudioURL, tmpPath, rulesContent, subs, send)
+		marks, err := runGrader(ctx, workspace, llmClient, tmpPath, rulesContent, subs, send)
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
@@ -519,7 +676,13 @@ func (s *srv) handleRegrade(w http.ResponseWriter, r *http.Request) {
 
 	// Snapshot mutable fields once for the lifetime of this request.
 	workspace := s.getWorkspace()
-	lmStudioURL := s.getLMStudioURL()
+
+	const defaultTimeout = 5 * time.Minute
+	llmClient, err := s.buildLLMClient(defaultTimeout)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	sseStream(w, func(send func(string)) {
 		defer cleanup()
@@ -533,7 +696,7 @@ func (s *srv) handleRegrade(w http.ResponseWriter, r *http.Request) {
 		}
 		send(logEvent(fmt.Sprintf("Found %d student submissions on disk", len(subs))))
 
-		marks, err := runGrader(ctx, workspace, lmStudioURL, tmpPath, rulesContent, subs, send)
+		marks, err := runGrader(ctx, workspace, llmClient, tmpPath, rulesContent, subs, send)
 		if err != nil {
 			send(errorEvent(err.Error()))
 			return
@@ -710,15 +873,12 @@ func (s *srv) handlePatchMark(w http.ResponseWriter, r *http.Request) {
 
 // ── shared grading helper ─────────────────────────────────────────────────────
 
-func runGrader(ctx context.Context, workspace, lmStudioURL, solutionPath, systemPrompt string, subs []classroom.Submission, send func(string)) ([]grader.Mark, error) {
-	const defaultTimeout = 5 * time.Minute
-
-	lmClient := lmstudio.NewClient(lmStudioURL, "", defaultTimeout)
+func runGrader(ctx context.Context, workspace string, llmClient llm.Client, solutionPath, systemPrompt string, subs []classroom.Submission, send func(string)) ([]grader.Mark, error) {
 	g := grader.New(grader.Config{
 		WorkspaceRoot:   workspace,
 		TeacherSolution: solutionPath,
 		SystemPrompt:    systemPrompt,
-	}, lmClient)
+	}, llmClient)
 
 	total := len(subs)
 	var marks []grader.Mark

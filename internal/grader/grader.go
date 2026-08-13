@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/prokhorind/classroom-grader/internal/classroom"
-	"github.com/prokhorind/classroom-grader/internal/lmstudio"
+	"github.com/prokhorind/classroom-grader/internal/llm"
 )
 
 // Mark is one graded student record — mirrors the marks.json schema.
@@ -38,11 +38,11 @@ type Config struct {
 // Grader grades a set of already-downloaded submissions.
 type Grader struct {
 	cfg    Config
-	client *lmstudio.Client
+	client llm.Client
 }
 
 // New creates a Grader.
-func New(cfg Config, client *lmstudio.Client) *Grader {
+func New(cfg Config, client llm.Client) *Grader {
 	return &Grader{cfg: cfg, client: client}
 }
 
@@ -90,20 +90,20 @@ func (g *Grader) gradeOne(ctx context.Context, sub classroom.Submission, teacher
 	// don't recognise it.
 	systemPrompt := strings.TrimSpace(g.cfg.SystemPrompt) + "\n/no_think"
 
-	messages := []lmstudio.Message{
+	messages := []llm.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 
 	reply, err := g.client.Complete(ctx, messages)
 	if err != nil {
-		return Mark{}, fmt.Errorf("LM Studio call failed: %w", err)
+		return Mark{}, fmt.Errorf("LLM call failed: %w", err)
 	}
 
 	mark, err := parseMark(reply, sub.StudentName, sub.StudentID)
 	if err != nil {
 		// Log the raw reply so the user can debug prompt/model issues
-		log.Printf("[grader] WARN: could not parse LM Studio reply for %s:\n%s", sub.StudentName, reply)
+		log.Printf("[grader] WARN: could not parse LLM reply for %s:\n%s", sub.StudentName, reply)
 		return Mark{}, fmt.Errorf("parsing mark for %s: %w", sub.StudentName, err)
 	}
 	return mark, nil

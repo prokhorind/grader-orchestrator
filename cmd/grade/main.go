@@ -1,5 +1,6 @@
 // Command grade fetches student submissions from Google Classroom and grades
-// them using a local LM Studio model, writing marks.json to the submissions folder.
+// them using a configurable LLM backend (LM Studio or Gemini), writing marks.json
+// to the submissions folder.
 //
 // Usage:
 //
@@ -21,7 +22,9 @@ import (
 	"time"
 
 	"github.com/prokhorind/classroom-grader/internal/classroom"
+	"github.com/prokhorind/classroom-grader/internal/gemini"
 	"github.com/prokhorind/classroom-grader/internal/grader"
+	"github.com/prokhorind/classroom-grader/internal/llm"
 	"github.com/prokhorind/classroom-grader/internal/lmstudio"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -37,9 +40,16 @@ func main() {
 	mcpRootFlag := flag.String("mcp-root", "", "google-classroom-mcp project root — credentials and token are loaded from <mcp-root>/.secrets/ (overrides -credentials and -token)")
 	credsFlag := flag.String("credentials", "", "Path to Google OAuth2 credentials.json (overrides GOOGLE_CREDENTIALS_FILE)")
 	tokenFlag := flag.String("token", "", "Path to cached OAuth2 token.json (overrides GOOGLE_TOKEN_FILE)")
+	// LM Studio flags
 	lmURLFlag := flag.String("lm-url", "http://localhost:1234/v1", "LM Studio API base URL")
 	lmModelFlag := flag.String("lm-model", "", "LM Studio model identifier (leave empty to use loaded model)")
-	lmTimeoutFlag := flag.Duration("lm-timeout", 5*time.Minute, "Timeout per LM Studio request")
+	lmTimeoutFlag := flag.Duration("lm-timeout", 5*time.Minute, "Timeout per LLM request")
+	// Backend selector
+	llmBackendFlag := flag.String("llm-backend", "lmstudio", `LLM backend: "lmstudio" (default) or "gemini"`)
+	// Gemini flags
+	geminiAPIKeyFlag := flag.String("gemini-api-key", "", "Google Gemini API key (required when -llm-backend=gemini; overrides GEMINI_API_KEY env var)")
+	geminiModelFlag := flag.String("gemini-model", "", `Gemini model name (default "gemini-2.5-flash")`)
+
 	studentsFlag := flag.String("students", "", "Comma-separated surnames to grade (empty = all students)")
 	skipFetchFlag := flag.Bool("skip-fetch", false, "Skip downloading submissions (use already-downloaded files)")
 	flag.Parse()
@@ -99,14 +109,33 @@ func main() {
 	}
 	log.Printf("[main] grading %d submissions", len(submissions))
 
-	// ── Grade via LM Studio ───────────────────────────────────────────────────
-	lmClient := lmstudio.NewClient(*lmURLFlag, *lmModelFlag, *lmTimeoutFlag)
+	// ── Build LLM client ──────────────────────────────────────────────────────
+	var llmClient llm.Client
+	switch *llmBackendFlag {
+	case "gemini":
+		apiKey := *geminiAPIKeyFlag
+		if apiKey == "" {
+			apiKey = os.Getenv("GEMINI_API_KEY")
+		}
+		if apiKey == "" {
+			log.Fatalf("Gemini API key is required: set -gemini-api-key or GEMINI_API_KEY")
+		}
+		if *geminiModelFlag == "" {
+			log.Fatalf("Gemini model is required: set -gemini-model (use -llm-backend=gemini and check available models)")
+		}
+		llmClient = gemini.NewClient(apiKey, *geminiModelFlag, *lmTimeoutFlag)
+		log.Printf("[main] using Gemini backend (model=%s)", *geminiModelFlag)
+	default: // "lmstudio"
+		llmClient = lmstudio.NewClient(*lmURLFlag, *lmModelFlag, *lmTimeoutFlag)
+		log.Printf("[main] using LM Studio backend (%s)", *lmURLFlag)
+	}
 
+	// ── Grade ─────────────────────────────────────────────────────────────────
 	g := grader.New(grader.Config{
 		WorkspaceRoot:   workspace,
 		TeacherSolution: solutionPath,
 		SystemPrompt:    string(systemPrompt),
-	}, lmClient)
+	}, llmClient)
 
 	marks, err := g.GradeAll(ctx, submissions)
 	if err != nil {
