@@ -79,6 +79,18 @@ func DefaultConfigPaths() (string, string, error) {
 	return filepath.Join(appDir, "credentials.json"), filepath.Join(appDir, "token.json"), nil
 }
 
+// DefaultGeminiKeyFilePath returns the default path for a plaintext Gemini API
+// key file: ~/.config/classroom-grader/gemini-api-key (or the OS equivalent).
+// The file, if present, should contain only the key on a single line.
+func DefaultGeminiKeyFilePath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		configDir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configDir, "classroom-grader", "gemini-api-key")
+}
+
 // ResolveCredentialsAndTokenPaths resolves paths for credentials and token files based on overrides and defaults.
 func ResolveCredentialsAndTokenPaths(credsOverride, tokenOverride, mcpRootOverride string) (string, string, error) {
 	credsFile := credsOverride

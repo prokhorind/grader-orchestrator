@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/prokhorind/classroom-grader/internal/classroom"
@@ -33,7 +34,8 @@ func main() {
 	lmModelFlag := flag.String("lm-model", "", "LM Studio grading model identifier (e.g. qwen/qwen3-coder-30b)")
 	lmVisionModelFlag := flag.String("lm-vision-model", "", "LM Studio vision/OCR model identifier (e.g. qwen/qwen3-vl-8b)")
 	llmBackendFlag := flag.String("llm-backend", "lmstudio", `LLM backend to use: "lmstudio" or "gemini"`)
-	geminiAPIKeyFlag := flag.String("gemini-api-key", "", "Google Gemini API key (required when -llm-backend=gemini; overrides GEMINI_API_KEY env var)")
+	geminiAPIKeyFlag := flag.String("gemini-api-key", "", "Google Gemini API key (overrides GEMINI_API_KEY env var and -gemini-key-file)")
+	geminiKeyFileFlag := flag.String("gemini-key-file", "", "Path to a file containing the Gemini API key (overrides GEMINI_KEY_FILE env var and the default ~/.config/classroom-grader/gemini-api-key)")
 	geminiModelFlag := flag.String("gemini-model", "", `Gemini model name (default "gemini-2.5-flash")`)
 	portFlag := flag.Int("port", 8080, "HTTP port to listen on")
 	flag.Parse()
@@ -54,10 +56,30 @@ func main() {
 		log.Fatalf("resolving credentials and token paths: %v", err)
 	}
 
-	// Gemini API key: flag → GEMINI_API_KEY env var.
+	// Gemini API key file: flag → GEMINI_KEY_FILE env var → OS default path.
+	geminiKeyFile := *geminiKeyFileFlag
+	if geminiKeyFile == "" {
+		geminiKeyFile = os.Getenv("GEMINI_KEY_FILE")
+	}
+	if geminiKeyFile == "" {
+		geminiKeyFile = classroom.DefaultGeminiKeyFilePath()
+	}
+
+	// Gemini API key resolution order:
+	//   1. -gemini-api-key flag (explicit, highest priority)
+	//   2. GEMINI_API_KEY environment variable
+	//   3. Contents of the key file (lowest priority, pre-populated silently)
 	geminiAPIKey := *geminiAPIKeyFlag
 	if geminiAPIKey == "" {
 		geminiAPIKey = os.Getenv("GEMINI_API_KEY")
+	}
+	if geminiAPIKey == "" {
+		if raw, err := os.ReadFile(geminiKeyFile); err == nil {
+			geminiAPIKey = strings.TrimSpace(string(raw))
+			if geminiAPIKey != "" {
+				log.Printf("Gemini API key loaded from %s", geminiKeyFile)
+			}
+		}
 	}
 
 	cfg := server.Config{
@@ -69,6 +91,7 @@ func main() {
 		LMStudioVisionModel: *lmVisionModelFlag,
 		LLMBackend:          *llmBackendFlag,
 		GeminiAPIKey:        geminiAPIKey,
+		GeminiKeyFile:       geminiKeyFile,
 		GeminiModel:         *geminiModelFlag,
 	}
 

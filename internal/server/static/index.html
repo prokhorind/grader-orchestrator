@@ -199,6 +199,12 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
       <span class="hint" id="gemini-hint"></span>
     </div>
     <div class="settings-row">
+      <label>Key file path</label>
+      <input type="text" id="gemini-key-file-input" placeholder="~/.config/classroom-grader/gemini-api-key" style="flex:1;font-size:.8rem" autocomplete="off" />
+      <button class="primary" onclick="saveGeminiKeyFile()">Load</button>
+      <span class="hint" id="gemini-key-file-hint"></span>
+    </div>
+    <div class="settings-row">
       <label>Gemini Model</label>
       <select id="gemini-model-select" style="flex:1" onchange="persistGeminiModel(this.value)">
         <option value="">— save API key first —</option>
@@ -903,6 +909,25 @@ async function loadSettings() {
     } catch(e) { /* non-fatal */ }
   }
 
+  // Always load the key-file path so the input is pre-filled regardless of active backend
+  try {
+    const kf = await apiFetch('/api/gemini-key-file');
+    const kfInput = document.getElementById('gemini-key-file-input');
+    if (kfInput) {
+      kfInput.value = kf.path || '';
+      const hint = document.getElementById('gemini-key-file-hint');
+      if (hint) {
+        if (kf.loaded) {
+          hint.textContent = '✔ key loaded';
+          hint.style.color = '#34d399';
+        } else {
+          hint.textContent = 'file not found';
+          hint.style.color = '#94a3b8';
+        }
+      }
+    }
+  } catch(e) { /* non-fatal */ }
+
   renderSettingsRulesStatus();
 }
 
@@ -1156,6 +1181,47 @@ async function saveGeminiConfig() {
     await loadGeminiModels(model);
     hint.textContent = 'Saved!';
     setTimeout(() => { hint.textContent = ''; }, 2000);
+  } catch(e) {
+    hint.textContent = 'Error: ' + e.message;
+    hint.style.color = '#f87171';
+  }
+}
+
+// saveGeminiKeyFile POSTs a file path to /api/gemini-key-file.
+// The server reads the key from that file and updates its in-memory state.
+// On success the API key input placeholder and model list are refreshed.
+async function saveGeminiKeyFile() {
+  const pathInput = document.getElementById('gemini-key-file-input');
+  const hint = document.getElementById('gemini-key-file-hint');
+  const path = pathInput.value.trim();
+
+  if (!path) { hint.textContent = 'Path cannot be empty.'; hint.style.color = '#f87171'; return; }
+
+  hint.textContent = 'Loading…';
+  hint.style.color = '#94a3b8';
+  try {
+    const resp = await fetch('/api/gemini-key-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || resp.statusText);
+
+    hint.textContent = '✔ key loaded';
+    hint.style.color = '#34d399';
+
+    // Update the API key placeholder to reflect a key is now active
+    const keyInput = document.getElementById('gemini-key-input');
+    if (keyInput) {
+      keyInput.value = '';
+      keyInput.placeholder = '••••••••••••••• (loaded from file)';
+    }
+
+    // Refresh the model list with the newly loaded key
+    const modelSel = document.getElementById('gemini-model-select');
+    const currentModel = modelSel ? modelSel.value : '';
+    await loadGeminiModels(currentModel);
   } catch(e) {
     hint.textContent = 'Error: ' + e.message;
     hint.style.color = '#f87171';

@@ -56,8 +56,17 @@ Runs fully offline. Requires LM Studio to be running with its local server enabl
 Calls the Google Gemini API. Requires a valid API key (free tier is sufficient for
 most classroom workloads).
 
-Set via `-gemini-api-key` or the `GEMINI_API_KEY` environment variable.
+Key resolution order (first non-empty wins):
+1. `-gemini-api-key` flag
+2. `GEMINI_API_KEY` environment variable
+3. Contents of a plaintext key file (one line, no quotes)
+
+The default key file path is `~/.config/classroom-grader/gemini-api-key` (or the OS
+equivalent). Override with `-gemini-key-file` or `GEMINI_KEY_FILE`.
+
 The model is chosen from the live model list returned by the API (e.g. `gemini-2.5-flash`).
+In the web UI the key file path is shown in Settings and can be changed at runtime — clicking
+**Load** reads the new file and refreshes the model list immediately, without restarting the server.
 
 ---
 
@@ -157,7 +166,8 @@ hitting the Google Classroom API. Useful for:
 | `-lm-url` | `http://localhost:1234/v1` | LM Studio API base URL |
 | `-lm-model` | _(auto)_ | LM Studio grading model identifier |
 | `-lm-vision-model` | _(auto)_ | LM Studio vision/OCR model identifier |
-| `-gemini-api-key` | `$GEMINI_API_KEY` | Gemini API key |
+| `-gemini-api-key` | `$GEMINI_API_KEY` | Gemini API key (overrides key file) |
+| `-gemini-key-file` | `$GEMINI_KEY_FILE` → `~/.config/classroom-grader/gemini-api-key` | Path to plaintext file containing the Gemini API key |
 | `-gemini-model` | _(from UI)_ | Gemini model name (e.g. `gemini-2.5-flash`) |
 | `-port` | `8080` | HTTP port |
 

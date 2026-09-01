@@ -35,6 +35,7 @@ type Config struct {
 	LMStudioVisionModel string // OCR/vision model, e.g. "qwen/qwen3-vl-8b"
 	LLMBackend          string // "lmstudio" (default) or "gemini"
 	GeminiAPIKey        string
+	GeminiKeyFile       string // path to a plaintext file containing the API key
 	GeminiModel         string
 }
 
@@ -50,6 +51,7 @@ type srv struct {
 	lmStudioVisionModel string // mutable — OCR/vision model
 	llmBackend          string // mutable — "lmstudio" or "gemini"
 	geminiAPIKey        string // mutable — can be changed via /api/gemini-config
+	geminiKeyFile       string // mutable — path to plaintext key file, changeable via /api/gemini-key-file
 	geminiModel         string // mutable
 }
 
@@ -82,6 +84,7 @@ func New(cfg Config) http.Handler {
 		lmStudioVisionModel: cfg.LMStudioVisionModel,
 		llmBackend:          backend,
 		geminiAPIKey:        cfg.GeminiAPIKey,
+		geminiKeyFile:       cfg.GeminiKeyFile,
 		geminiModel:         cfg.GeminiModel,
 	}
 
@@ -107,6 +110,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("/api/llm-backend", s.handleLLMBackend)
 	mux.HandleFunc("/api/gemini-config", s.handleGeminiConfig)
 	mux.HandleFunc("/api/gemini-models", s.handleGeminiModels)
+	mux.HandleFunc("/api/gemini-key-file", s.handleGeminiKeyFile)
 	mux.HandleFunc("/api/courses", s.handleCourses)
 	mux.HandleFunc("/api/assignments", s.handleAssignments)
 	mux.HandleFunc("/api/students", s.handleStudents)
@@ -387,7 +391,21 @@ func (s *srv) handleGeminiConfig(w http.ResponseWriter, r *http.Request) {
 		if req.Model != "" {
 			s.geminiModel = req.Model
 		}
+		keyFile := s.geminiKeyFile
+		keyToSave := s.geminiAPIKey
 		s.mu.Unlock()
+
+		// Persist the key to the key file so it survives server restarts.
+		if req.APIKey != "" && keyFile != "" {
+			if err := os.MkdirAll(filepath.Dir(keyFile), 0700); err != nil {
+				log.Printf("[gemini-config] WARN: could not create key file dir: %v", err)
+			} else if err := os.WriteFile(keyFile, []byte(keyToSave), 0600); err != nil {
+				log.Printf("[gemini-config] WARN: could not write key file %s: %v", keyFile, err)
+			} else {
+				log.Printf("[gemini-config] key saved to %s", keyFile)
+			}
+		}
+
 		log.Printf("[gemini-config] updated (model=%s)", req.Model)
 		jsonOK(w, map[string]string{"status": "ok"})
 
@@ -417,6 +435,66 @@ func (s *srv) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, models)
+}
+
+// ── API: /api/gemini-key-file ─────────────────────────────────────────────────
+
+type geminiKeyFileResponse struct {
+	// Path is the current key-file path (always returned, even if the file
+	// does not exist yet).
+	Path string `json:"path"`
+	// Loaded is true when the file was found and contained a non-empty key.
+	Loaded bool `json:"loaded"`
+}
+
+// handleGeminiKeyFile handles GET (return current path + loaded status) and
+// POST (update the path and reload the key from the new file).
+func (s *srv) handleGeminiKeyFile(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		path := s.geminiKeyFile
+		key := s.geminiAPIKey
+		s.mu.RUnlock()
+		jsonOK(w, geminiKeyFileResponse{Path: path, Loaded: key != ""})
+
+	case http.MethodPost:
+		var req geminiKeyFileResponse
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Path == "" {
+			jsonError(w, "path is required", http.StatusBadRequest)
+			return
+		}
+		abs, err := filepath.Abs(req.Path)
+		if err != nil {
+			jsonError(w, "invalid path: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		raw, err := os.ReadFile(abs)
+		if err != nil {
+			jsonError(w, "reading key file: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		key := strings.TrimSpace(string(raw))
+		if key == "" {
+			jsonError(w, "key file is empty", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		s.geminiKeyFile = abs
+		s.geminiAPIKey = key
+		s.mu.Unlock()
+		log.Printf("[gemini-key-file] loaded key from %s", abs)
+		jsonOK(w, geminiKeyFileResponse{Path: abs, Loaded: true})
+
+	default:
+		jsonError(w, "GET or POST required", http.StatusMethodNotAllowed)
+	}
 }
 
 // ── API: /api/courses ─────────────────────────────────────────────────────────
