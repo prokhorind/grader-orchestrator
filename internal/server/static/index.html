@@ -167,6 +167,22 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
     <button class="primary" onclick="saveLMURL()">Save</button>
     <span class="hint" id="lmurl-hint"></span>
   </div>
+  <div class="settings-row" id="lmmodel-row">
+    <label>Grading Model</label>
+    <select id="lmmodel-select" style="flex:1">
+      <option value="">— click Detect to load models —</option>
+    </select>
+    <button class="secondary" onclick="detectLMModels()" title="Query LM Studio for loaded models">Detect</button>
+    <button class="primary" onclick="saveLMURL()">Save</button>
+  </div>
+  <div class="settings-row" id="lmvisionmodel-row">
+    <label>Vision / OCR Model</label>
+    <select id="lmvisionmodel-select" style="flex:1">
+      <option value="">— click Detect to load models —</option>
+    </select>
+    <button class="secondary" onclick="detectLMModels()" title="Query LM Studio for loaded models">Detect</button>
+    <button class="primary" onclick="saveLMURL()">Save</button>
+  </div>
   <div class="settings-row">
     <label>LLM Backend</label>
     <select id="llm-backend-select" onchange="saveBackend()">
@@ -847,25 +863,46 @@ async function loadSettings() {
   } catch(e) { console.warn('Could not load workspace:', e); }
 
   // LM Studio URL
+  let savedLMModel = '', savedLMVisionModel = '';
   try {
     const data = await apiFetch('/api/lm-url');
     document.getElementById('lmurl-input').value = data.lm_url;
+    savedLMModel = data.lm_model || '';
+    savedLMVisionModel = data.lm_vision_model || '';
   } catch(e) { console.warn('Could not load LM URL:', e); }
 
-  // LLM backend + Gemini config
+  // LLM backend — must run before detectLMModels so rows are visible first
+  let activeBackend = 'lmstudio';
   try {
     const data = await apiFetch('/api/llm-backend');
-    const sel = document.getElementById('llm-backend-select');
-    sel.value = data.backend;
-    updateBackendUI(data.backend);
+    activeBackend = data.backend;
+    document.getElementById('llm-backend-select').value = activeBackend;
   } catch(e) { console.warn('Could not load LLM backend:', e); }
 
-  try {
-    const data = await apiFetch('/api/gemini-config');
-    if (data.api_key) document.getElementById('gemini-key-input').placeholder = data.api_key; // show masked
-    // Populate model dropdown; pre-select whatever is already saved
-    await loadGeminiModels(data.model);
-  } catch(e) { /* non-fatal */ }
+  // Always call updateBackendUI so rows show/hide correctly
+  updateBackendUI(activeBackend);
+
+  // Populate LM Studio model dropdowns (only when lmstudio is active)
+  if (activeBackend !== 'gemini') {
+    try {
+      await detectLMModels(savedLMModel, savedLMVisionModel);
+    } catch(e) { console.warn('Could not detect LM models:', e); }
+  }
+
+  // Gemini config (only when gemini is active)
+  if (activeBackend === 'gemini') {
+    try {
+      const geminiData = await apiFetch('/api/gemini-config');
+      if (geminiData.api_key) document.getElementById('gemini-key-input').placeholder = geminiData.api_key;
+      await loadGeminiModels(geminiData.model);
+    } catch(e) { /* non-fatal */ }
+  } else {
+    try {
+      const data = await apiFetch('/api/gemini-config');
+      if (data.api_key) document.getElementById('gemini-key-input').placeholder = data.api_key;
+    } catch(e) { /* non-fatal */ }
+  }
+
   renderSettingsRulesStatus();
 }
 
@@ -875,7 +912,10 @@ async function loadWorkspace() { await loadSettings(); }
 function toggleSettings() {
   const panel = document.getElementById('settings-panel');
   panel.classList.toggle('open');
-  if (panel.classList.contains('open')) renderSettingsRulesStatus();
+  if (panel.classList.contains('open')) {
+    renderSettingsRulesStatus();
+    loadSettings();
+  }
 }
 
 async function saveWorkspace() {
@@ -908,6 +948,8 @@ async function saveWorkspace() {
 
 async function saveLMURL() {
   const input = document.getElementById('lmurl-input');
+  const modelSel = document.getElementById('lmmodel-select');
+  const visionModelSel = document.getElementById('lmvisionmodel-select');
   const hint = document.getElementById('lmurl-hint');
   const url = input.value.trim();
   if (!url) { hint.textContent = 'URL cannot be empty.'; hint.style.color = '#f87171'; return; }
@@ -916,12 +958,18 @@ async function saveLMURL() {
     const resp = await fetch('/api/lm-url', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lm_url: url })
+      body: JSON.stringify({
+        lm_url: url,
+        lm_model: modelSel.value,
+        lm_vision_model: visionModelSel.value
+      })
     });
     const result = await resp.json();
     if (!resp.ok) throw new Error(result.error || resp.statusText);
 
     input.value = result.lm_url;
+    setSelectValue(modelSel, result.lm_model || '');
+    setSelectValue(visionModelSel, result.lm_vision_model || '');
     hint.textContent = 'Saved!';
     hint.style.color = '#34d399';
     setTimeout(() => { hint.textContent = ''; }, 2000);
@@ -931,19 +979,79 @@ async function saveLMURL() {
   }
 }
 
+// detectLMModels queries LM Studio's /v1/models via the server proxy and
+// populates the grading and vision model dropdowns. Optional preselectModel /
+// preselectVision strings restore previously saved values.
+async function detectLMModels(preselectModel, preselectVision) {
+  const modelSel = document.getElementById('lmmodel-select');
+  const visionSel = document.getElementById('lmvisionmodel-select');
+
+  modelSel.innerHTML = '<option value="">— detecting… —</option>';
+  visionSel.innerHTML = '<option value="">— detecting… —</option>';
+
+  try {
+    const models = await apiFetch('/api/lm-models');
+
+    if (!models || models.length === 0) {
+      modelSel.innerHTML = '<option value="">— no models loaded in LM Studio —</option>';
+      visionSel.innerHTML = '<option value="">— no models loaded in LM Studio —</option>';
+      return;
+    }
+
+    // Populate both selects with all loaded models
+    [modelSel, visionSel].forEach(sel => {
+      sel.innerHTML = '<option value="">— auto (first loaded) —</option>';
+      models.forEach(id => {
+        const o = document.createElement('option');
+        o.value = id;
+        o.textContent = id;
+        sel.appendChild(o);
+      });
+    });
+
+    // Restore saved selections
+    if (preselectModel) setSelectValue(modelSel, preselectModel);
+    if (preselectVision) setSelectValue(visionSel, preselectVision);
+  } catch(e) {
+    const msg = `— LM Studio unreachable —`;
+    modelSel.innerHTML = `<option value="">${msg}</option>`;
+    visionSel.innerHTML = `<option value="">${msg}</option>`;
+  }
+}
+
+// setSelectValue sets a select's value, adding a custom option if the value
+// isn't already in the list (handles manually-typed model IDs).
+function setSelectValue(sel, val) {
+  if (!val) return;
+  sel.value = val;
+  if (sel.value !== val) {
+    // Value not in list — add it
+    const o = document.createElement('option');
+    o.value = val;
+    o.textContent = val;
+    sel.appendChild(o);
+    sel.value = val;
+  }
+}
+
 function updateBackendUI(backend) {
   const geminiSection = document.getElementById('gemini-settings');
   const lmurlRow = document.getElementById('lmurl-input').closest('.settings-row');
+  const lmmodelRow = document.getElementById('lmmodel-row');
+  const lmvisionmodelRow = document.getElementById('lmvisionmodel-row');
   const label = document.getElementById('backend-label');
   if (backend === 'gemini') {
     geminiSection.style.display = '';
     lmurlRow.style.display = 'none';
+    lmmodelRow.style.display = 'none';
+    lmvisionmodelRow.style.display = 'none';
     if (label) label.textContent = 'Google Gemini';
-    // Eagerly load models if the section just became visible
     loadGeminiModels();
   } else {
     geminiSection.style.display = 'none';
     lmurlRow.style.display = '';
+    lmmodelRow.style.display = '';
+    lmvisionmodelRow.style.display = '';
     if (label) label.textContent = 'local LM Studio';
   }
 }

@@ -3,7 +3,6 @@ module github.com/prokhorind/classroom-grader
 go 1.25.6
 
 require (
-	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/text v0.35.0
 	google.golang.org/api v0.267.0

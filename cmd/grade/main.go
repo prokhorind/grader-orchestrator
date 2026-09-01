@@ -26,6 +26,7 @@ import (
 	"github.com/prokhorind/classroom-grader/internal/grader"
 	"github.com/prokhorind/classroom-grader/internal/llm"
 	"github.com/prokhorind/classroom-grader/internal/lmstudio"
+	"github.com/prokhorind/classroom-grader/internal/vision"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"golang.org/x/text/unicode/norm"
@@ -86,31 +87,9 @@ func main() {
 
 	ctx := context.Background()
 
-	// ── Fetch or reuse submissions ────────────────────────────────────────────
-	var submissions []classroom.Submission
-	var courseID string
-
-	if *skipFetchFlag {
-		log.Printf("[main] --skip-fetch: loading submissions from disk")
-		submissions, courseID, err = loadSubmissionsFromDisk(workspace, *classFlag, *assignmentFlag)
-		if err != nil {
-			log.Fatalf("loading submissions from disk: %v", err)
-		}
-	} else {
-		submissions, courseID, err = fetchSubmissions(ctx, workspace, *classFlag, *assignmentFlag, credsFile, tokenFile, *studentsFlag)
-		if err != nil {
-			log.Fatalf("fetching submissions: %v", err)
-		}
-	}
-
-	if len(submissions) == 0 {
-		log.Println("[main] no submissions found — nothing to grade")
-		os.Exit(0)
-	}
-	log.Printf("[main] grading %d submissions", len(submissions))
-
-	// ── Build LLM client ──────────────────────────────────────────────────────
+	// ── Build LLM + vision clients ────────────────────────────────────────────
 	var llmClient llm.Client
+	var visionClient vision.Client
 	switch *llmBackendFlag {
 	case "gemini":
 		apiKey := *geminiAPIKeyFlag
@@ -124,11 +103,36 @@ func main() {
 			log.Fatalf("Gemini model is required: set -gemini-model (use -llm-backend=gemini and check available models)")
 		}
 		llmClient = gemini.NewClient(apiKey, *geminiModelFlag, *lmTimeoutFlag)
+		visionClient = gemini.NewVisionClient(apiKey, *geminiModelFlag, *lmTimeoutFlag)
 		log.Printf("[main] using Gemini backend (model=%s)", *geminiModelFlag)
 	default: // "lmstudio"
 		llmClient = lmstudio.NewClient(*lmURLFlag, *lmModelFlag, *lmTimeoutFlag)
-		log.Printf("[main] using LM Studio backend (%s)", *lmURLFlag)
+		visionClient = lmstudio.NewVisionClient(*lmURLFlag, lmstudio.VisionModel, *lmTimeoutFlag)
+		log.Printf("[main] using LM Studio backend (%s, vision model=%s)", *lmURLFlag, lmstudio.VisionModel)
 	}
+
+	// ── Fetch or reuse submissions ────────────────────────────────────────────
+	var submissions []classroom.Submission
+	var courseID string
+
+	if *skipFetchFlag {
+		log.Printf("[main] --skip-fetch: loading submissions from disk")
+		submissions, courseID, err = loadSubmissionsFromDisk(workspace, *classFlag, *assignmentFlag)
+		if err != nil {
+			log.Fatalf("loading submissions from disk: %v", err)
+		}
+	} else {
+		submissions, courseID, err = fetchSubmissions(ctx, workspace, *classFlag, *assignmentFlag, credsFile, tokenFile, *studentsFlag, visionClient)
+		if err != nil {
+			log.Fatalf("fetching submissions: %v", err)
+		}
+	}
+
+	if len(submissions) == 0 {
+		log.Println("[main] no submissions found — nothing to grade")
+		os.Exit(0)
+	}
+	log.Printf("[main] grading %d submissions", len(submissions))
 
 	// ── Grade ─────────────────────────────────────────────────────────────────
 	g := grader.New(grader.Config{
@@ -161,7 +165,7 @@ func main() {
 
 // fetchSubmissions authenticates with Google Classroom and downloads submissions.
 // Returns the submissions and the resolved numeric course ID.
-func fetchSubmissions(ctx context.Context, workspace, className, assignmentName, credsFile, tokenFile, studentsCSV string) ([]classroom.Submission, string, error) {
+func fetchSubmissions(ctx context.Context, workspace, className, assignmentName, credsFile, tokenFile, studentsCSV string, visionClient vision.Client) ([]classroom.Submission, string, error) {
 	if _, err := os.Stat(credsFile); os.IsNotExist(err) {
 		return nil, "", fmt.Errorf("Google credentials.json file not found at %s.\nPlease download it from Google Cloud Console and place it at that path, or specify -credentials / GOOGLE_CREDENTIALS_FILE.", credsFile)
 	}
@@ -212,7 +216,7 @@ func fetchSubmissions(ctx context.Context, workspace, className, assignmentName,
 	filter := classroom.NewStudentFilter(splitCSV(studentsCSV))
 
 	log.Printf("[main] fetching submissions: course=%s (%s) assignment=%q", course.Name, course.ID, assignment.Title)
-	subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient, course.ID, course.Name, assignment.ID, assignment.Title, submissionsDir, filter)
+	subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient, course.ID, course.Name, assignment.ID, assignment.Title, submissionsDir, filter, visionClient)
 	return subs, course.Name, err
 }
 

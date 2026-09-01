@@ -8,17 +8,29 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/ledongthuc/pdf"
+	"github.com/prokhorind/classroom-grader/internal/vision"
 	googleclassroom "google.golang.org/api/classroom/v1"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
+
+// imageMIMETypes lists Drive MIME types that should be sent to the vision
+// client for OCR instead of downloaded as raw binary.
+var imageMIMETypes = map[string]string{
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
+	"image/bmp":  ".bmp",
+	"image/tiff": ".tiff",
+	"image/heic": ".heic",
+	"image/heif": ".heif",
+}
 
 const (
 	retryMaxAttempts = 3
@@ -123,7 +135,11 @@ func withRetry(ctx context.Context, label string, fn func() error) error {
 
 // DownloadSubmissions fetches all student submissions for an assignment and
 // saves them under baseDir/<courseFolderName>/<assignmentTitle>/<studentID>/<timestamp>/
-func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, httpClient *http.Client, courseID, courseFolderName, courseWorkID, assignmentTitle, baseDir string, filter StudentFilter) ([]Submission, error) {
+//
+// visionClient is optional (pass nil to disable). When provided, PDFs and
+// images are sent to the vision model for text extraction instead of being
+// stored as raw binary files.
+func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, httpClient *http.Client, courseID, courseFolderName, courseWorkID, assignmentTitle, baseDir string, filter StudentFilter, visionClient vision.Client) ([]Submission, error) {
 	driveSvc, err := drive.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("creating drive service: %w", err)
@@ -169,7 +185,7 @@ func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, http
 						switch {
 						case att.DriveFile != nil:
 							log.Printf("[get_submissions]   drive file: id=%s title=%q", att.DriveFile.Id, att.DriveFile.Title)
-							df, err = handleDriveAttachment(ctx, driveSvc, att.DriveFile, versionDir)
+							df, err = handleDriveAttachment(ctx, driveSvc, att.DriveFile, versionDir, visionClient)
 						case att.Link != nil:
 							log.Printf("[get_submissions]   link: %s", att.Link.Url)
 							df, err = handleLinkAttachment(att.Link, versionDir)
@@ -218,7 +234,7 @@ func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, http
 	return submissions, err
 }
 
-func handleDriveAttachment(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, destDir string) (*DownloadedFile, error) {
+func handleDriveAttachment(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, destDir string, visionClient vision.Client) (*DownloadedFile, error) {
 	var meta *drive.File
 	err := withRetry(ctx, fmt.Sprintf("fetch metadata %s", df.Title), func() error {
 		var e error
@@ -234,7 +250,17 @@ func handleDriveAttachment(ctx context.Context, svc *drive.Service, df *googlecl
 	}
 
 	if meta.MimeType == "application/pdf" {
-		return downloadAndExtractPDF(ctx, svc, df, destDir)
+		return downloadAndExtractPDF(ctx, svc, df, destDir, visionClient)
+	}
+
+	// Image types — use the vision client for OCR when available, otherwise
+	// download the raw file and let the grader deal with it.
+	if ext, isImage := imageMIMETypes[meta.MimeType]; isImage {
+		if visionClient != nil {
+			return downloadAndExtractImage(ctx, svc, df, destDir, ext, visionClient)
+		}
+		// No vision client: fall through and store the raw binary.
+		log.Printf("[get_submissions]   WARN: image %q downloaded as raw binary (no vision client configured)", df.Title)
 	}
 
 	destPath := filepath.Join(destDir, df.Title)
@@ -244,8 +270,58 @@ func handleDriveAttachment(ctx context.Context, svc *drive.Service, df *googlecl
 	return &DownloadedFile{Name: df.Title, Path: destPath}, nil
 }
 
-func downloadAndExtractPDF(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, destDir string) (*DownloadedFile, error) {
-	tmp, err := os.CreateTemp("", "classroom-pdf-*.pdf")
+// downloadAndExtractPDF downloads a PDF from Drive, saves the original PDF to
+// destDir for reference, and uses the vision client to transcribe its text.
+// If no vision client is configured the raw PDF is the only output saved.
+func downloadAndExtractPDF(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, destDir string, visionClient vision.Client) (*DownloadedFile, error) {
+	// Always save the original PDF so it can be inspected later.
+	pdfPath := filepath.Join(destDir, df.Title)
+
+	var resp *http.Response
+	err := withRetry(ctx, fmt.Sprintf("download pdf %s", df.Title), func() error {
+		var e error
+		resp, e = svc.Files.Get(df.Id).Context(ctx).Download()
+		return e
+	})
+	if err != nil {
+		return nil, fmt.Errorf("downloading PDF %s: %w", df.Title, err)
+	}
+	defer resp.Body.Close()
+
+	pdfFile, err := os.Create(pdfPath)
+	if err != nil {
+		return nil, fmt.Errorf("creating PDF file %s: %w", df.Title, err)
+	}
+	if _, err := io.Copy(pdfFile, resp.Body); err != nil {
+		pdfFile.Close()
+		return nil, fmt.Errorf("writing PDF %s: %w", df.Title, err)
+	}
+	pdfFile.Close()
+
+	if visionClient == nil {
+		log.Printf("[get_submissions]   WARN: no vision client — saved raw PDF %s", df.Title)
+		return &DownloadedFile{Name: df.Title, Path: pdfPath}, nil
+	}
+
+	text, err := visionClient.ExtractText(ctx, pdfPath)
+	if err != nil {
+		return nil, fmt.Errorf("vision extraction for PDF %s: %w", df.Title, err)
+	}
+
+	name := df.Title + ".txt"
+	txtPath := filepath.Join(destDir, name)
+	if err := os.WriteFile(txtPath, []byte(text), 0644); err != nil {
+		return nil, fmt.Errorf("writing extracted PDF text for %s: %w", df.Title, err)
+	}
+
+	log.Printf("[get_submissions]   vision extracted %d bytes from PDF %s → %s", len(text), df.Title, name)
+	return &DownloadedFile{Name: name, Path: txtPath}, nil
+}
+
+// downloadAndExtractImage downloads an image from Drive, calls the vision
+// client to transcribe its text, and saves the result as a .txt file.
+func downloadAndExtractImage(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, destDir, ext string, visionClient vision.Client) (*DownloadedFile, error) {
+	tmp, err := os.CreateTemp("", "classroom-img-*"+ext)
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file for %s: %w", df.Title, err)
 	}
@@ -253,35 +329,35 @@ func downloadAndExtractPDF(ctx context.Context, svc *drive.Service, df *googlecl
 	defer os.Remove(tmpPath)
 
 	var resp *http.Response
-	err = withRetry(ctx, fmt.Sprintf("download pdf %s", df.Title), func() error {
+	err = withRetry(ctx, fmt.Sprintf("download image %s", df.Title), func() error {
 		var e error
 		resp, e = svc.Files.Get(df.Id).Context(ctx).Download()
 		return e
 	})
 	if err != nil {
 		tmp.Close()
-		return nil, fmt.Errorf("downloading PDF %s: %w", df.Title, err)
+		return nil, fmt.Errorf("downloading image %s: %w", df.Title, err)
 	}
 	defer resp.Body.Close()
 
 	if _, err := io.Copy(tmp, resp.Body); err != nil {
 		tmp.Close()
-		return nil, fmt.Errorf("writing temp PDF %s: %w", df.Title, err)
+		return nil, fmt.Errorf("writing temp image %s: %w", df.Title, err)
 	}
 	tmp.Close()
 
-	text, err := extractPDFText(tmpPath)
+	text, err := visionClient.ExtractText(ctx, tmpPath)
 	if err != nil {
-		return nil, fmt.Errorf("extracting text from PDF %s: %w", df.Title, err)
+		return nil, fmt.Errorf("vision extraction for image %s: %w", df.Title, err)
 	}
 
 	name := df.Title + ".txt"
 	destPath := filepath.Join(destDir, name)
 	if err := os.WriteFile(destPath, []byte(text), 0644); err != nil {
-		return nil, fmt.Errorf("writing extracted PDF text for %s: %w", df.Title, err)
+		return nil, fmt.Errorf("writing extracted image text for %s: %w", df.Title, err)
 	}
 
-	log.Printf("[get_submissions]   extracted %d bytes of text from PDF %s", len(text), df.Title)
+	log.Printf("[get_submissions]   vision extracted %d bytes from image %s", len(text), df.Title)
 	return &DownloadedFile{Name: name, Path: destPath}, nil
 }
 
@@ -329,87 +405,6 @@ func handleLinkAttachment(link *googleclassroom.Link, destDir string) (*Download
 		return nil, fmt.Errorf("saving link %s: %w", link.Url, err)
 	}
 	return &DownloadedFile{Name: name, Path: destPath}, nil
-}
-
-func extractPDFText(path string) (string, error) {
-	text, err := extractPDFTextWithPdftotext(path)
-	if err == nil {
-		log.Printf("[extractPDFText] extracted %d bytes using pdftotext", len(text))
-		return text, nil
-	}
-	log.Printf("[extractPDFText] pdftotext failed (%v), falling back to ledongthuc/pdf", err)
-	return extractPDFTextFallback(path)
-}
-
-func extractPDFTextWithPdftotext(path string) (string, error) {
-	cmd := exec.Command("pdftotext", "-layout", path, "-")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("pdftotext: %w", err)
-	}
-	return string(output), nil
-}
-
-func extractPDFTextFallback(path string) (string, error) {
-	f, r, err := pdf.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	var sb strings.Builder
-	for i := 1; i <= r.NumPage(); i++ {
-		p := r.Page(i)
-		if p.V.IsNull() {
-			continue
-		}
-		text, err := p.GetPlainText(nil)
-		if err != nil {
-			log.Printf("[extractPDFText] WARN page %d: %v", i, err)
-			continue
-		}
-		sb.WriteString(cleanPDFCode(text))
-		sb.WriteString("\n\n")
-	}
-	return sb.String(), nil
-}
-
-func cleanPDFCode(text string) string {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-
-	lines := strings.Split(text, "\n")
-	var rebuilt []string
-	var currentLine strings.Builder
-
-	for _, line := range lines {
-		trimmed := strings.TrimRight(line, " ")
-		if strings.TrimSpace(trimmed) == "" {
-			if currentLine.Len() > 0 {
-				rebuilt = append(rebuilt, currentLine.String())
-				currentLine.Reset()
-			}
-			rebuilt = append(rebuilt, "")
-			continue
-		}
-		if len(trimmed) < 12 && !strings.HasSuffix(trimmed, ";") &&
-			!strings.HasSuffix(trimmed, "{") && !strings.HasSuffix(trimmed, "}") {
-			if currentLine.Len() > 0 {
-				currentLine.WriteString(" ")
-			}
-			currentLine.WriteString(trimmed)
-		} else {
-			if currentLine.Len() > 0 {
-				rebuilt = append(rebuilt, currentLine.String())
-				currentLine.Reset()
-			}
-			rebuilt = append(rebuilt, trimmed)
-		}
-	}
-	if currentLine.Len() > 0 {
-		rebuilt = append(rebuilt, currentLine.String())
-	}
-	return strings.Join(rebuilt, "\n")
 }
 
 func saveTextSubmission(filename, content, destDir string) (*DownloadedFile, error) {

@@ -21,31 +21,36 @@ import (
 	"github.com/prokhorind/classroom-grader/internal/grader"
 	"github.com/prokhorind/classroom-grader/internal/llm"
 	"github.com/prokhorind/classroom-grader/internal/lmstudio"
+	"github.com/prokhorind/classroom-grader/internal/vision"
 	"golang.org/x/oauth2"
 )
 
 // Config holds the server-level configuration resolved at startup.
 type Config struct {
-	Workspace    string
-	CredsFile    string
-	TokenFile    string
-	LMStudioURL  string
-	LLMBackend   string // "lmstudio" (default) or "gemini"
-	GeminiAPIKey string
-	GeminiModel  string
+	Workspace           string
+	CredsFile           string
+	TokenFile           string
+	LMStudioURL         string
+	LMStudioModel       string // grading model, e.g. "qwen/qwen3-coder-30b"
+	LMStudioVisionModel string // OCR/vision model, e.g. "qwen/qwen3-vl-8b"
+	LLMBackend          string // "lmstudio" (default) or "gemini"
+	GeminiAPIKey        string
+	GeminiModel         string
 }
 
 // srv is the internal handler type that owns mutable state.
 // All exported behaviour is wired through New() which returns http.Handler.
 type srv struct {
-	mu           sync.RWMutex
-	workspace    string // mutable — can be changed via /api/workspace
-	credsFile    string
-	tokenFile    string
-	lmStudioURL  string // mutable — can be changed via /api/lm-url
-	llmBackend   string // mutable — "lmstudio" or "gemini"
-	geminiAPIKey string // mutable — can be changed via /api/gemini-config
-	geminiModel  string // mutable
+	mu                  sync.RWMutex
+	workspace           string // mutable — can be changed via /api/workspace
+	credsFile           string
+	tokenFile           string
+	lmStudioURL         string // mutable — can be changed via /api/lm-url
+	lmStudioModel       string // mutable — grading model
+	lmStudioVisionModel string // mutable — OCR/vision model
+	llmBackend          string // mutable — "lmstudio" or "gemini"
+	geminiAPIKey        string // mutable — can be changed via /api/gemini-config
+	geminiModel         string // mutable
 }
 
 // getWorkspace returns the current workspace path under a read lock.
@@ -69,13 +74,15 @@ func New(cfg Config) http.Handler {
 		backend = "lmstudio"
 	}
 	s := &srv{
-		workspace:    cfg.Workspace,
-		credsFile:    cfg.CredsFile,
-		tokenFile:    cfg.TokenFile,
-		lmStudioURL:  cfg.LMStudioURL,
-		llmBackend:   backend,
-		geminiAPIKey: cfg.GeminiAPIKey,
-		geminiModel:  cfg.GeminiModel,
+		workspace:           cfg.Workspace,
+		credsFile:           cfg.CredsFile,
+		tokenFile:           cfg.TokenFile,
+		lmStudioURL:         cfg.LMStudioURL,
+		lmStudioModel:       cfg.LMStudioModel,
+		lmStudioVisionModel: cfg.LMStudioVisionModel,
+		llmBackend:          backend,
+		geminiAPIKey:        cfg.GeminiAPIKey,
+		geminiModel:         cfg.GeminiModel,
 	}
 
 	mux := http.NewServeMux()
@@ -96,6 +103,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("/api/auth-exchange", s.handleAuthExchange)
 	mux.HandleFunc("/api/workspace", s.handleWorkspace)
 	mux.HandleFunc("/api/lm-url", s.handleLMURL)
+	mux.HandleFunc("/api/lm-models", s.handleLMModels)
 	mux.HandleFunc("/api/llm-backend", s.handleLLMBackend)
 	mux.HandleFunc("/api/gemini-config", s.handleGeminiConfig)
 	mux.HandleFunc("/api/gemini-models", s.handleGeminiModels)
@@ -153,18 +161,12 @@ func (s *srv) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// getLMStudioURL returns the current LM Studio URL under a read lock.
-func (s *srv) getLMStudioURL() string {
+// getLMStudioConfig returns the LM Studio URL, grading model, and vision model
+// under a read lock.
+func (s *srv) getLMStudioConfig() (url, model, visionModel string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.lmStudioURL
-}
-
-// setLMStudioURL updates the LM Studio URL under a write lock.
-func (s *srv) setLMStudioURL(url string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lmStudioURL = url
+	return s.lmStudioURL, s.lmStudioModel, s.lmStudioVisionModel
 }
 
 // getLLMBackend returns the active backend name under a read lock.
@@ -195,24 +197,49 @@ func (s *srv) buildLLMClient(timeout time.Duration) (llm.Client, error) {
 		}
 		return gemini.NewClient(apiKey, model, timeout), nil
 	default: // "lmstudio"
-		s.mu.RLock()
-		url := s.lmStudioURL
-		s.mu.RUnlock()
-		return lmstudio.NewClient(url, "", timeout), nil
+		url, model, _ := s.getLMStudioConfig()
+		return lmstudio.NewClient(url, model, timeout), nil
+	}
+}
+
+// buildVisionClient constructs the vision (OCR) client matching the active
+// LLM backend.  Returns nil when vision is not applicable — callers treat nil
+// as "no vision".
+func (s *srv) buildVisionClient(timeout time.Duration) vision.Client {
+	backend := s.getLLMBackend()
+	switch backend {
+	case "gemini":
+		apiKey, model := s.getGeminiConfig()
+		if apiKey == "" || model == "" {
+			return nil
+		}
+		return gemini.NewVisionClient(apiKey, model, timeout)
+	default: // "lmstudio"
+		url, _, visionModel := s.getLMStudioConfig()
+		if url == "" {
+			return nil
+		}
+		if visionModel == "" {
+			visionModel = lmstudio.VisionModel // default: qwen/qwen3-vl-8b
+		}
+		return lmstudio.NewVisionClient(url, visionModel, timeout)
 	}
 }
 
 // ── API: /api/lm-url ──────────────────────────────────────────────────────────
 
 type lmURLResponse struct {
-	LMURL string `json:"lm_url"`
+	LMURL         string `json:"lm_url"`
+	LMModel       string `json:"lm_model"`        // grading model, e.g. "qwen/qwen3-coder-30b"
+	LMVisionModel string `json:"lm_vision_model"` // OCR model, e.g. "qwen/qwen3-vl-8b"
 }
 
-// handleLMURL handles GET (read current URL) and POST (update URL).
+// handleLMURL handles GET (read current URL + models) and POST (update).
 func (s *srv) handleLMURL(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		jsonOK(w, lmURLResponse{LMURL: s.getLMStudioURL()})
+		url, model, visionModel := s.getLMStudioConfig()
+		jsonOK(w, lmURLResponse{LMURL: url, LMModel: model, LMVisionModel: visionModel})
 
 	case http.MethodPost:
 		var req lmURLResponse
@@ -224,13 +251,74 @@ func (s *srv) handleLMURL(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "lm_url is required", http.StatusBadRequest)
 			return
 		}
-		s.setLMStudioURL(req.LMURL)
-		log.Printf("[lm-url] changed to %s", req.LMURL)
-		jsonOK(w, lmURLResponse{LMURL: req.LMURL})
+		s.mu.Lock()
+		s.lmStudioURL = req.LMURL
+		s.lmStudioModel = req.LMModel
+		s.lmStudioVisionModel = req.LMVisionModel
+		s.mu.Unlock()
+		log.Printf("[lm-url] changed to %s (model=%q vision_model=%q)", req.LMURL, req.LMModel, req.LMVisionModel)
+		url, model, visionModel := s.getLMStudioConfig()
+		jsonOK(w, lmURLResponse{LMURL: url, LMModel: model, LMVisionModel: visionModel})
 
 	default:
 		jsonError(w, "GET or POST required", http.StatusMethodNotAllowed)
 	}
+}
+
+// ── API: /api/lm-models — proxy GET /v1/models to LM Studio ─────────────────
+
+// handleLMModels proxies a GET to LM Studio's /v1/models endpoint and returns
+// the list of loaded model IDs.  The browser can't call LM Studio directly due
+// to CORS, so this server-side proxy is needed.
+func (s *srv) handleLMModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	lmURL, _, _ := s.getLMStudioConfig()
+	if lmURL == "" {
+		lmURL = "http://localhost:1234/v1"
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, lmURL+"/models", nil)
+	if err != nil {
+		jsonError(w, "building request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		jsonError(w, "LM Studio unreachable: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		jsonError(w, "reading response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Parse and return just the list of model IDs.
+	var modelsResp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &modelsResp); err != nil {
+		jsonError(w, "parsing models response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	ids := make([]string, 0, len(modelsResp.Data))
+	for _, m := range modelsResp.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	jsonOK(w, ids)
 }
 
 // ── API: /api/llm-backend ─────────────────────────────────────────────────────
@@ -594,6 +682,7 @@ func (s *srv) handleGrade(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	visionClient := s.buildVisionClient(defaultTimeout)
 
 	sseStream(w, func(send func(string)) {
 		defer cleanup()
@@ -611,7 +700,7 @@ func (s *srv) handleGrade(w http.ResponseWriter, r *http.Request) {
 		submissionsDir := filepath.Join(workspace, "submissions")
 
 		subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient,
-			req.CourseID, courseFolderName, req.AssignmentID, req.AssignmentTitle, submissionsDir, filter)
+			req.CourseID, courseFolderName, req.AssignmentID, req.AssignmentTitle, submissionsDir, filter, visionClient)
 		if err != nil {
 			send(errorEvent("download failed: " + err.Error()))
 			return

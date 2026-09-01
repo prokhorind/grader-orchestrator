@@ -30,6 +30,8 @@ func main() {
 	credsFlag := flag.String("credentials", "", "Path to Google OAuth2 credentials.json (overrides GOOGLE_CREDENTIALS_FILE and default OS path)")
 	tokenFlag := flag.String("token", "", "Path to cached OAuth2 token.json (overrides GOOGLE_TOKEN_FILE and default OS path)")
 	lmURLFlag := flag.String("lm-url", "http://localhost:1234/v1", "LM Studio API base URL")
+	lmModelFlag := flag.String("lm-model", "", "LM Studio grading model identifier (e.g. qwen/qwen3-coder-30b)")
+	lmVisionModelFlag := flag.String("lm-vision-model", "", "LM Studio vision/OCR model identifier (e.g. qwen/qwen3-vl-8b)")
 	llmBackendFlag := flag.String("llm-backend", "lmstudio", `LLM backend to use: "lmstudio" or "gemini"`)
 	geminiAPIKeyFlag := flag.String("gemini-api-key", "", "Google Gemini API key (required when -llm-backend=gemini; overrides GEMINI_API_KEY env var)")
 	geminiModelFlag := flag.String("gemini-model", "", `Gemini model name (default "gemini-2.5-flash")`)
@@ -59,13 +61,15 @@ func main() {
 	}
 
 	cfg := server.Config{
-		Workspace:    workspace,
-		CredsFile:    creds,
-		TokenFile:    token,
-		LMStudioURL:  *lmURLFlag,
-		LLMBackend:   *llmBackendFlag,
-		GeminiAPIKey: geminiAPIKey,
-		GeminiModel:  *geminiModelFlag,
+		Workspace:           workspace,
+		CredsFile:           creds,
+		TokenFile:           token,
+		LMStudioURL:         *lmURLFlag,
+		LMStudioModel:       *lmModelFlag,
+		LMStudioVisionModel: *lmVisionModelFlag,
+		LLMBackend:          *llmBackendFlag,
+		GeminiAPIKey:        geminiAPIKey,
+		GeminiModel:         *geminiModelFlag,
 	}
 
 	mux := server.New(cfg)

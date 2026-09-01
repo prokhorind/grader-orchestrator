@@ -63,6 +63,47 @@ type chatResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// modelsResponse is the subset of the OpenAI /v1/models response we need.
+type modelsResponse struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+// resolveModel returns c.model if set, otherwise queries /v1/models and
+// returns the first loaded model's ID.  This handles the case where LM Studio
+// has multiple models loaded and requires an explicit model field.
+func (c *Client) resolveModel(ctx context.Context) (string, error) {
+	if c.model != "" {
+		return c.model, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/models", nil)
+	if err != nil {
+		return "", fmt.Errorf("building models request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		// If we can't reach /v1/models just fall back to empty — LM Studio
+		// with a single model will still accept an empty model field.
+		return "", nil
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", nil // best-effort; let the chat call surface any real error
+	}
+
+	var mr modelsResponse
+	if err := json.Unmarshal(raw, &mr); err != nil || len(mr.Data) == 0 {
+		return "", nil
+	}
+
+	return mr.Data[0].ID, nil
+}
+
 // Complete sends messages to LM Studio and returns the assistant reply text.
 // It implements llm.Client.
 func (c *Client) Complete(ctx context.Context, messages []llm.Message) (string, error) {
@@ -71,8 +112,13 @@ func (c *Client) Complete(ctx context.Context, messages []llm.Message) (string, 
 		wire[i] = wireMessage{Role: m.Role, Content: m.Content}
 	}
 
+	model, err := c.resolveModel(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolving model: %w", err)
+	}
+
 	reqBody := chatRequest{
-		Model:       c.model,
+		Model:       model,
 		Messages:    wire,
 		Temperature: 0.1, // low temp for deterministic grading
 		Stream:      false,
