@@ -18,11 +18,13 @@ import (
 
 // Mark is one graded student record — mirrors the marks.json schema.
 type Mark struct {
-	StudentName string `json:"student_name"`
-	StudentID   string `json:"student_id"`
-	Mark        int    `json:"mark"`
-	Deductions  string `json:"deductions"`
-	Comment     string `json:"comment"`
+	StudentName      string `json:"student_name"`
+	StudentID        string `json:"student_id"`
+	Mark             int    `json:"mark"`
+	Deductions       string `json:"deductions"`
+	Comment          string `json:"comment"`
+	DetectedLanguage string `json:"detected_language"`
+	EquivalenceNotes string `json:"equivalence_notes"`
 }
 
 // Config holds everything the grader needs.
@@ -62,11 +64,13 @@ func (g *Grader) GradeAll(ctx context.Context, submissions []classroom.Submissio
 		if err != nil {
 			log.Printf("[grader] WARN: could not read files for %s: %v — scoring 1", sub.StudentName, err)
 			marks = append(marks, Mark{
-				StudentName: sub.StudentName,
-				StudentID:   sub.StudentID,
-				Mark:        1,
-				Deductions:  "could not read submission files",
-				Comment:     "Не вдалося прочитати файли роботи.",
+				StudentName:      sub.StudentName,
+				StudentID:        sub.StudentID,
+				Mark:             1,
+				Deductions:       "could not read submission files",
+				Comment:          "Не вдалося прочитати файли роботи.",
+				DetectedLanguage: "idk",
+				EquivalenceNotes: "idk",
 			})
 			continue
 		}
@@ -160,6 +164,8 @@ func buildUserPrompt(name, id, teacherCode, studentCode string) string {
 	sb.WriteString(`  "mark": <integer 1-12>,` + "\n")
 	sb.WriteString(`  "deductions": "short factual notes in English",` + "\n")
 	sb.WriteString(`  "comment": "1-2 sentences in Ukrainian, friendly tone"` + "\n")
+	sb.WriteString(`  "detected_language": "programming language in which submission was written",` + "\n")
+	sb.WriteString(`  "equivalence_notes": "1-2 sentences about differences between teacher solution and student submission",` + "\n")
 	sb.WriteString("}\n")
 	sb.WriteString("Output ONLY the JSON object — no markdown fences, no extra text.\n")
 	return sb.String()
