@@ -18,13 +18,15 @@ import (
 
 // Mark is one graded student record — mirrors the marks.json schema.
 type Mark struct {
-	StudentName      string `json:"student_name"`
-	StudentID        string `json:"student_id"`
-	Mark             int    `json:"mark"`
-	Deductions       string `json:"deductions"`
-	Comment          string `json:"comment"`
-	DetectedLanguage string `json:"detected_language"`
-	EquivalenceNotes string `json:"equivalence_notes"`
+	StudentName      string   `json:"student_name"`
+	StudentID        string   `json:"student_id"`
+	Mark             int      `json:"mark"`
+	Deductions       string   `json:"deductions"`
+	Comment          string   `json:"comment"`
+	DetectedLanguage string   `json:"detected_language"`
+	EquivalenceNotes string   `json:"equivalence_notes"`
+	ReasonNot12      string   `json:"reason_not_12"`
+	SubmissionFiles  []string `json:"submission_files,omitempty"` // file formats submitted, e.g. ["gdoc", "pdf", "png"]
 }
 
 // Config holds everything the grader needs.
@@ -71,6 +73,7 @@ func (g *Grader) GradeAll(ctx context.Context, submissions []classroom.Submissio
 				Comment:          "Не вдалося прочитати файли роботи.",
 				DetectedLanguage: "idk",
 				EquivalenceNotes: "idk",
+				SubmissionFiles:  submissionFileFormats(sub),
 			})
 			continue
 		}
@@ -79,6 +82,7 @@ func (g *Grader) GradeAll(ctx context.Context, submissions []classroom.Submissio
 		if err != nil {
 			return nil, fmt.Errorf("grading %s: %w", sub.StudentName, err)
 		}
+		mark.SubmissionFiles = submissionFileFormats(sub)
 		marks = append(marks, mark)
 		log.Printf("[grader] %s → %d", sub.StudentName, mark.Mark)
 	}
@@ -166,6 +170,7 @@ func buildUserPrompt(name, id, teacherCode, studentCode string) string {
 	sb.WriteString(`  "comment": "1-2 sentences in Ukrainian, friendly tone"` + "\n")
 	sb.WriteString(`  "detected_language": "programming language in which submission was written",` + "\n")
 	sb.WriteString(`  "equivalence_notes": "1-2 sentences about differences between teacher solution and student submission",` + "\n")
+	sb.WriteString(`  "reason_not_12": "exact technical reasons why points were lost, or 'None' if mark is 12"` + "\n")
 	sb.WriteString("}\n")
 	sb.WriteString("Output ONLY the JSON object — no markdown fences, no extra text.\n")
 	return sb.String()
@@ -306,4 +311,54 @@ func readMarksFile(path string) []Mark {
 		return nil
 	}
 	return marks
+}
+
+// submissionFileFormats returns a deduplicated list of human-readable format
+// labels derived from the file names in a submission, e.g. ["gdoc", "pdf", "png"].
+// Used to populate Mark.SubmissionFiles for display in the UI.
+func submissionFileFormats(sub classroom.Submission) []string {
+	seen := map[string]struct{}{}
+	var result []string
+	for _, f := range sub.Files {
+		if filepath.Base(f.Path) == "student.json" {
+			continue
+		}
+		if strings.HasSuffix(f.Name, ".skipped") {
+			continue
+		}
+		label := fileFormatLabel(f.Name)
+		if _, ok := seen[label]; !ok {
+			seen[label] = struct{}{}
+			result = append(result, label)
+		}
+	}
+	return result
+}
+
+// fileFormatLabel maps a stored filename to a short display label.
+// Google Doc exports are stored as "<title>.txt"; PDFs as "<title>.pdf.txt";
+// docx as "<title>.docx.txt"; images as "<title>.png.txt" etc.
+func fileFormatLabel(name string) string {
+	lower := strings.ToLower(name)
+	switch {
+	case strings.HasSuffix(lower, ".pdf.txt"):
+		return "pdf"
+	case strings.HasSuffix(lower, ".docx.txt"):
+		return "docx"
+	case strings.HasSuffix(lower, ".png.txt"), strings.HasSuffix(lower, ".jpg.txt"),
+		strings.HasSuffix(lower, ".jpeg.txt"), strings.HasSuffix(lower, ".webp.txt"),
+		strings.HasSuffix(lower, ".gif.txt"), strings.HasSuffix(lower, ".bmp.txt"),
+		strings.HasSuffix(lower, ".tiff.txt"), strings.HasSuffix(lower, ".heic.txt"):
+		return "image"
+	case strings.HasSuffix(lower, "short_answer.txt"):
+		return "text answer"
+	case strings.HasSuffix(lower, ".txt"):
+		return "gdoc"
+	default:
+		ext := filepath.Ext(lower)
+		if ext != "" {
+			return strings.TrimPrefix(ext, ".")
+		}
+		return "file"
+	}
 }

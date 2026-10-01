@@ -799,16 +799,25 @@ function renderTable(prefix, marks) {
   const surname = name => { const p = (name || '').trim().split(/\s+/); return p[1] || p[0]; };
   const sorted = [...marks].sort((a, b) => surname(a.student_name).localeCompare(surname(b.student_name), 'uk'));
 
-  let html = '<table><thead><tr><th>#</th><th>Student</th><th>Mark</th><th>Deductions</th><th>Comment</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>#</th><th>Student</th><th>Mark</th><th>Lang</th><th>Deductions</th><th>Why not 12</th><th>Comment</th></tr></thead><tbody>';
   sorted.forEach((m, i) => {
     const chipClass = m.mark >= 10 ? 'mark-hi' : m.mark >= 7 ? 'mark-mid' : 'mark-lo';
     const deductions = m.deductions ? escHtml(m.deductions) : '<span style="color:#475569">—</span>';
+    const lang = m.detected_language ? escHtml(m.detected_language) : '<span style="color:#475569">—</span>';
+    const whyNot12 = m.reason_not_12 && m.reason_not_12.toLowerCase() !== 'none'
+      ? escHtml(m.reason_not_12) : '<span style="color:#475569">—</span>';
+    const fileBadges = (m.submission_files || [])
+      .map(f => `<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:.68rem;background:#1e2235;border:1px solid #2d3148;color:#64748b;margin-right:3px">${escHtml(f)}</span>`)
+      .join('');
     html += `<tr>
       <td style="color:#475569">${i + 1}</td>
       <td><div style="font-weight:500">${escHtml(m.student_name)}</div>
-          <div style="font-size:.72rem;color:#475569">${escHtml(m.student_id || '')}</div></td>
+          <div style="font-size:.72rem;color:#475569">${escHtml(m.student_id || '')}</div>
+          <div style="margin-top:3px">${fileBadges}</div></td>
       <td><span class="mark-chip ${chipClass}">${m.mark}</span></td>
+      <td><span style="font-size:.78rem;color:#94a3b8">${lang}</span></td>
       <td><span class="deductions">${deductions}</span></td>
+      <td><span style="font-size:.78rem;color:#94a3b8">${whyNot12}</span></td>
       <td><span class="comment">${m.comment ? escHtml(m.comment) : ''}</span></td>
     </tr>`;
   });
