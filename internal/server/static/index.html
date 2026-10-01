@@ -795,8 +795,9 @@ function renderTable(prefix, marks) {
     return;
   }
 
-  // Sort by name
-  const sorted = [...marks].sort((a, b) => a.student_name.localeCompare(b.student_name, 'uk'));
+  // Sort by surname (first word of full name) ASC
+  const surname = name => { const p = (name || '').trim().split(/\s+/); return p[1] || p[0]; };
+  const sorted = [...marks].sort((a, b) => surname(a.student_name).localeCompare(surname(b.student_name), 'uk'));
 
   let html = '<table><thead><tr><th>#</th><th>Student</th><th>Mark</th><th>Deductions</th><th>Comment</th></tr></thead><tbody>';
   sorted.forEach((m, i) => {
