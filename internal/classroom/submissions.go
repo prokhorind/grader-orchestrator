@@ -33,6 +33,39 @@ var plainTextExtensions = map[string]struct{}{
 	".h": {}, ".hpp": {},
 }
 
+// plainTextMIMETypes maps MIME types that should be treated as plain text
+// even when the filename has no recognised extension.
+var plainTextMIMETypes = map[string]struct{}{
+	"text/plain":                {},
+	"text/x-python":             {},
+	"text/x-java-source":        {},
+	"text/x-csrc":               {},
+	"text/x-c++src":             {},
+	"text/x-go":                 {},
+	"text/x-ruby":               {},
+	"text/x-php":                {},
+	"text/x-sh":                 {},
+	"text/x-script.python":      {},
+	"application/x-python-code": {},
+	"application/javascript":    {},
+	"application/typescript":    {},
+	"application/json":          {},
+	"application/xml":           {},
+	"application/x-sh":          {},
+	"text/javascript":           {},
+	"text/typescript":           {},
+	"text/html":                 {},
+	"text/css":                  {},
+	"text/csv":                  {},
+	"text/xml":                  {},
+	"text/markdown":             {},
+	"text/x-kotlin":             {},
+	"text/x-swift":              {},
+	"text/x-rust":               {},
+	"text/x-csharp":             {},
+	"text/x-sql":                {},
+}
+
 // imageMIMETypes lists Drive MIME types that should be sent to the vision
 // client for OCR instead of downloaded as raw binary.
 var imageMIMETypes = map[string]string{
@@ -49,6 +82,11 @@ var imageMIMETypes = map[string]string{
 const (
 	retryMaxAttempts = 3
 	retryBaseDelay   = 2 * time.Second
+
+	// maxDownloadBytes is the per-file download limit. Files larger than this
+	// are rejected to prevent a student from uploading a huge file and
+	// exhausting disk space or memory.
+	maxDownloadBytes = 50 * 1024 * 1024 // 50 MB
 )
 
 // Submission represents a single student's downloaded submission.
@@ -145,6 +183,21 @@ func withRetry(ctx context.Context, label string, fn func() error) error {
 		}
 	}
 	return fmt.Errorf("%s failed after %d attempts: %w", label, retryMaxAttempts, err)
+}
+
+// limitedCopy copies at most maxDownloadBytes from src into dst.
+// If the source contains more data it returns an error so the caller can
+// skip the file instead of writing a truncated result silently.
+func limitedCopy(dst io.Writer, src io.Reader) (int64, error) {
+	lr := &io.LimitedReader{R: src, N: maxDownloadBytes + 1}
+	n, err := io.Copy(dst, lr)
+	if err != nil {
+		return n, err
+	}
+	if n > maxDownloadBytes {
+		return n, fmt.Errorf("file exceeds maximum allowed size of %d MB", maxDownloadBytes/1024/1024)
+	}
+	return n, nil
 }
 
 // DownloadSubmissions fetches all student submissions for an assignment and
@@ -274,7 +327,10 @@ func handleDriveAttachment(ctx context.Context, svc *drive.Service, df *googlecl
 	}
 
 	// Plain-text source files — download and keep as-is.
-	if _, isText := plainTextExtensions[strings.ToLower(filepath.Ext(df.Title))]; isText {
+	// Check by extension first; fall back to MIME type for files with no extension.
+	_, isTextByExt := plainTextExtensions[strings.ToLower(filepath.Ext(df.Title))]
+	_, isTextByMIME := plainTextMIMETypes[meta.MimeType]
+	if isTextByExt || isTextByMIME {
 		destPath := uniquePath(destDir, df.Title)
 		if err := downloadDriveFile(ctx, svc, df.Id, destPath); err != nil {
 			return nil, fmt.Errorf("downloading %s: %w", df.Title, err)
@@ -303,8 +359,14 @@ func handleDriveAttachment(ctx context.Context, svc *drive.Service, df *googlecl
 // destDir for reference, and uses the vision client to transcribe its text.
 // If no vision client is configured the raw PDF is the only output saved.
 func downloadAndExtractPDF(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, destDir string, visionClient vision.Client) (*DownloadedFile, error) {
-	// Always save the original PDF so it can be inspected later.
-	pdfPath := filepath.Join(destDir, df.Title)
+	// Ensure the saved file always has a .pdf extension so that downstream
+	// tools (and the vision client) can identify it correctly, even when the
+	// student uploaded a file whose name has no extension.
+	pdfName := df.Title
+	if strings.ToLower(filepath.Ext(pdfName)) != ".pdf" {
+		pdfName += ".pdf"
+	}
+	pdfPath := filepath.Join(destDir, pdfName)
 
 	var resp *http.Response
 	err := withRetry(ctx, fmt.Sprintf("download pdf %s", df.Title), func() error {
@@ -321,15 +383,15 @@ func downloadAndExtractPDF(ctx context.Context, svc *drive.Service, df *googlecl
 	if err != nil {
 		return nil, fmt.Errorf("creating PDF file %s: %w", df.Title, err)
 	}
-	if _, err := io.Copy(pdfFile, resp.Body); err != nil {
+	if _, err := limitedCopy(pdfFile, resp.Body); err != nil {
 		pdfFile.Close()
 		return nil, fmt.Errorf("writing PDF %s: %w", df.Title, err)
 	}
 	pdfFile.Close()
 
 	if visionClient == nil {
-		log.Printf("[get_submissions]   WARN: no vision client — saved raw PDF %s", df.Title)
-		return &DownloadedFile{Name: df.Title, Path: pdfPath}, nil
+		log.Printf("[get_submissions]   WARN: no vision client — saved raw PDF %s", pdfName)
+		return &DownloadedFile{Name: pdfName, Path: pdfPath}, nil
 	}
 
 	text, err := visionClient.ExtractText(ctx, pdfPath)
@@ -337,13 +399,13 @@ func downloadAndExtractPDF(ctx context.Context, svc *drive.Service, df *googlecl
 		return nil, fmt.Errorf("vision extraction for PDF %s: %w", df.Title, err)
 	}
 
-	name := df.Title + ".txt"
+	name := pdfName + ".txt"
 	txtPath := filepath.Join(destDir, name)
 	if err := os.WriteFile(txtPath, []byte(text), 0644); err != nil {
 		return nil, fmt.Errorf("writing extracted PDF text for %s: %w", df.Title, err)
 	}
 
-	log.Printf("[get_submissions]   vision extracted %d bytes from PDF %s → %s", len(text), df.Title, name)
+	log.Printf("[get_submissions]   vision extracted %d bytes from PDF %s → %s", len(text), pdfName, name)
 	return &DownloadedFile{Name: name, Path: txtPath}, nil
 }
 
@@ -369,7 +431,7 @@ func downloadAndExtractImage(ctx context.Context, svc *drive.Service, df *google
 	}
 	defer resp.Body.Close()
 
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	if _, err := limitedCopy(tmp, resp.Body); err != nil {
 		tmp.Close()
 		return nil, fmt.Errorf("writing temp image %s: %w", df.Title, err)
 	}
@@ -412,10 +474,11 @@ func exportGoogleDoc(ctx context.Context, svc *drive.Service, df *googleclassroo
 	}
 	defer resp.Body.Close()
 
-	textBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
+	var bodyBuf bytes.Buffer
+	if _, err := limitedCopy(&bodyBuf, resp.Body); err != nil {
 		return nil, fmt.Errorf("reading export body for %q: %w", df.Title, err)
 	}
+	textBytes := bodyBuf.Bytes()
 
 	combined := string(textBytes)
 
@@ -460,11 +523,12 @@ func extractGoogleDocImages(ctx context.Context, svc *drive.Service, df *googlec
 	}
 	defer zipResp.Body.Close()
 
-	zipBytes, err := io.ReadAll(zipResp.Body)
-	if err != nil {
+	var zipBuf bytes.Buffer
+	if _, err := limitedCopy(&zipBuf, zipResp.Body); err != nil {
 		log.Printf("[get_submissions]   WARN: reading ZIP body for %q: %v", df.Title, err)
 		return nil
 	}
+	zipBytes := zipBuf.Bytes()
 
 	r, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
@@ -574,7 +638,7 @@ func downloadDriveFile(ctx context.Context, svc *drive.Service, fileID, destPath
 	}
 	defer f.Close()
 
-	_, err = io.Copy(f, resp.Body)
+	_, err = limitedCopy(f, resp.Body)
 	return err
 }
 
@@ -585,10 +649,28 @@ func saveSkippedFile(att *googleclassroom.Attachment, reason error, destDir stri
 	} else if att.Link != nil {
 		title = att.Link.Title
 	}
-	log.Printf("WARN: skipping attachment %q: %v", title, reason)
+
+	isSizeViolation := strings.Contains(reason.Error(), "exceeds maximum allowed size")
+
+	if isSizeViolation {
+		log.Printf("WARN: file size limit exceeded for attachment %q — possible abuse attempt: %v", title, reason)
+	} else {
+		log.Printf("WARN: skipping attachment %q: %v", title, reason)
+	}
+
 	name := Sanitize(title) + ".skipped"
 	destPath := filepath.Join(destDir, name)
-	content := fmt.Sprintf("File: %s\nError: %v\n", title, reason)
+
+	var content string
+	if isSizeViolation {
+		content = fmt.Sprintf(
+			"File: %s\nStatus: REJECTED — file size limit exceeded (%d MB max)\nNote: This file was suspiciously large and was not downloaded.\nError: %v\n",
+			title, maxDownloadBytes/1024/1024, reason,
+		)
+	} else {
+		content = fmt.Sprintf("File: %s\nError: %v\n", title, reason)
+	}
+
 	if err := os.WriteFile(destPath, []byte(content), 0644); err != nil {
 		log.Printf("WARN: could not write skipped marker for %q: %v", title, err)
 		return nil
@@ -628,7 +710,7 @@ func downloadAndExtractDocx(ctx context.Context, svc *drive.Service, df *googlec
 		}
 		defer resp.Body.Close()
 		buf.Reset()
-		_, e = io.Copy(&buf, resp.Body)
+		_, e = limitedCopy(&buf, resp.Body)
 		return e
 	})
 	if err != nil {
