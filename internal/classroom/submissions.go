@@ -417,19 +417,16 @@ func exportGoogleDoc(ctx context.Context, svc *drive.Service, df *googleclassroo
 		return nil, fmt.Errorf("reading export body for %q: %w", df.Title, err)
 	}
 
-	// When a vision client is available, also export the doc as PDF and OCR it.
-	// This captures text inside embedded images (screenshots, diagrams with text,
-	// etc.) that the plain-text export silently drops.
-	// We append the OCR output after the text export; if OCR fails we just log a
-	// warning so the text-only result is still saved (no regression).
 	combined := string(textBytes)
+
+	// OCR embedded images when a vision client is available.
+	// We export the doc as a ZIP (HTML + images/), extract only the image files,
+	// and OCR them — this avoids duplicating the text already in the plain-text export.
 	if visionClient != nil && exportMime == "text/plain" {
-		ocrText, ocrErr := exportGoogleDocAsPDFAndOCR(ctx, svc, df, visionClient)
-		if ocrErr != nil {
-			log.Printf("[get_submissions]   WARN: OCR of embedded images in %q failed: %v", df.Title, ocrErr)
-		} else if ocrText != "" {
-			combined = combined + "\n\n=== embedded image text (OCR) ===\n" + ocrText
-			log.Printf("[get_submissions]   appended %d bytes of OCR text from embedded images in %q", len(ocrText), df.Title)
+		ocrParts := extractGoogleDocImages(ctx, svc, df, visionClient)
+		if len(ocrParts) > 0 {
+			combined = combined + "\n\n=== embedded image text (OCR) ===\n" + strings.Join(ocrParts, "\n\n")
+			log.Printf("[get_submissions]   appended OCR text from %d embedded image(s) in %q", len(ocrParts), df.Title)
 		}
 	}
 
@@ -446,34 +443,83 @@ func exportGoogleDoc(ctx context.Context, svc *drive.Service, df *googleclassroo
 	return &DownloadedFile{Name: filepath.Base(destPath), Path: destPath}, nil
 }
 
-// exportGoogleDocAsPDFAndOCR exports a Google Doc as PDF and runs the vision
-// client over it to extract text from embedded images. Returns the OCR result.
-func exportGoogleDocAsPDFAndOCR(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, visionClient vision.Client) (string, error) {
-	var pdfResp *http.Response
-	err := withRetry(ctx, fmt.Sprintf("export pdf %s", df.Title), func() error {
+// extractGoogleDocImages exports a Google Doc as a ZIP archive (HTML+images),
+// extracts only the image files, OCRs each one, and returns the non-empty results.
+// This is used to capture text inside screenshots or diagrams embedded in the doc
+// without duplicating the regular text content.
+func extractGoogleDocImages(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, visionClient vision.Client) []string {
+	var zipResp *http.Response
+	err := withRetry(ctx, fmt.Sprintf("export zip %s", df.Title), func() error {
 		var e error
-		pdfResp, e = svc.Files.Export(df.Id, "application/pdf").Context(ctx).Download()
+		zipResp, e = svc.Files.Export(df.Id, "application/zip").Context(ctx).Download()
 		return e
 	})
 	if err != nil {
-		return "", fmt.Errorf("exporting %q as PDF: %w", df.Title, err)
+		log.Printf("[get_submissions]   WARN: could not export %q as ZIP for image OCR: %v", df.Title, err)
+		return nil
 	}
-	defer pdfResp.Body.Close()
+	defer zipResp.Body.Close()
 
-	tmp, err := os.CreateTemp("", "gdoc-pdf-*.pdf")
+	zipBytes, err := io.ReadAll(zipResp.Body)
 	if err != nil {
-		return "", fmt.Errorf("creating temp PDF: %w", err)
+		log.Printf("[get_submissions]   WARN: reading ZIP body for %q: %v", df.Title, err)
+		return nil
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
 
-	if _, err := io.Copy(tmp, pdfResp.Body); err != nil {
+	r, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		log.Printf("[get_submissions]   WARN: opening ZIP for %q: %v", df.Title, err)
+		return nil
+	}
+
+	imageExts := map[string]struct{}{
+		".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {},
+		".webp": {}, ".bmp": {}, ".tiff": {}, ".tif": {},
+		".heic": {}, ".heif": {},
+	}
+
+	var parts []string
+	for _, f := range r.File {
+		ext := strings.ToLower(filepath.Ext(f.Name))
+		if _, ok := imageExts[ext]; !ok {
+			continue
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			log.Printf("[get_submissions]   WARN: opening ZIP entry %s: %v", f.Name, err)
+			continue
+		}
+
+		tmp, err := os.CreateTemp("", "gdoc-img-*"+ext)
+		if err != nil {
+			rc.Close()
+			log.Printf("[get_submissions]   WARN: creating temp file for %s: %v", f.Name, err)
+			continue
+		}
+		tmpPath := tmp.Name()
+
+		_, copyErr := io.Copy(tmp, rc)
+		rc.Close()
 		tmp.Close()
-		return "", fmt.Errorf("writing temp PDF for %q: %w", df.Title, err)
-	}
-	tmp.Close()
 
-	return visionClient.ExtractText(ctx, tmpPath)
+		if copyErr != nil {
+			os.Remove(tmpPath)
+			log.Printf("[get_submissions]   WARN: writing temp image %s: %v", f.Name, copyErr)
+			continue
+		}
+
+		ocrText, err := visionClient.ExtractText(ctx, tmpPath)
+		os.Remove(tmpPath)
+		if err != nil {
+			log.Printf("[get_submissions]   WARN: OCR of embedded image %s: %v", f.Name, err)
+			continue
+		}
+		if t := strings.TrimSpace(ocrText); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	return parts
 }
 
 func handleLinkAttachment(link *googleclassroom.Link, destDir string) (*DownloadedFile, error) {
