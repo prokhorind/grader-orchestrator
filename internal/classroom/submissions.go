@@ -1,8 +1,11 @@
 package classroom
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +21,17 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
+
+// plainTextExtensions lists file extensions that can be read as plain text
+// and passed directly to the grader without any conversion.
+var plainTextExtensions = map[string]struct{}{
+	".py": {}, ".js": {}, ".ts": {}, ".json": {}, ".txt": {},
+	".md": {}, ".csv": {}, ".java": {}, ".c": {}, ".cpp": {},
+	".go": {}, ".rb": {}, ".php": {}, ".sh": {}, ".yaml": {},
+	".yml": {}, ".xml": {}, ".html": {}, ".css": {}, ".sql": {},
+	".r": {}, ".kt": {}, ".swift": {}, ".rs": {}, ".cs": {},
+	".h": {}, ".hpp": {},
+}
 
 // imageMIMETypes lists Drive MIME types that should be sent to the vision
 // client for OCR instead of downloaded as raw binary.
@@ -253,6 +267,21 @@ func handleDriveAttachment(ctx context.Context, svc *drive.Service, df *googlecl
 		return downloadAndExtractPDF(ctx, svc, df, destDir, visionClient)
 	}
 
+	// .docx — extract plain text from the Word XML.
+	if meta.MimeType == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+		strings.ToLower(filepath.Ext(df.Title)) == ".docx" {
+		return downloadAndExtractDocx(ctx, svc, df, destDir)
+	}
+
+	// Plain-text source files — download and keep as-is.
+	if _, isText := plainTextExtensions[strings.ToLower(filepath.Ext(df.Title))]; isText {
+		destPath := uniquePath(destDir, df.Title)
+		if err := downloadDriveFile(ctx, svc, df.Id, destPath); err != nil {
+			return nil, fmt.Errorf("downloading %s: %w", df.Title, err)
+		}
+		return &DownloadedFile{Name: filepath.Base(destPath), Path: destPath}, nil
+	}
+
 	// Image types — use the vision client for OCR when available, otherwise
 	// download the raw file and let the grader deal with it.
 	if ext, isImage := imageMIMETypes[meta.MimeType]; isImage {
@@ -263,11 +292,11 @@ func handleDriveAttachment(ctx context.Context, svc *drive.Service, df *googlecl
 		log.Printf("[get_submissions]   WARN: image %q downloaded as raw binary (no vision client configured)", df.Title)
 	}
 
-	destPath := filepath.Join(destDir, df.Title)
+	destPath := uniquePath(destDir, df.Title)
 	if err := downloadDriveFile(ctx, svc, df.Id, destPath); err != nil {
 		return nil, fmt.Errorf("downloading %s: %w", df.Title, err)
 	}
-	return &DownloadedFile{Name: df.Title, Path: destPath}, nil
+	return &DownloadedFile{Name: filepath.Base(destPath), Path: destPath}, nil
 }
 
 // downloadAndExtractPDF downloads a PDF from Drive, saves the original PDF to
@@ -367,8 +396,10 @@ func exportGoogleDoc(ctx context.Context, svc *drive.Service, df *googleclassroo
 		exportMime = "text/csv"
 	}
 
+	// Use uniquePath so that multiple Google Docs submitted by the same student
+	// (e.g. one per task) get distinct filenames instead of overwriting each other.
 	name := df.Title + ".txt"
-	destPath := filepath.Join(destDir, name)
+	destPath := uniquePath(destDir, name)
 
 	var resp *http.Response
 	err := withRetry(ctx, fmt.Sprintf("export %s", df.Title), func() error {
@@ -390,7 +421,7 @@ func exportGoogleDoc(ctx context.Context, svc *drive.Service, df *googleclassroo
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		return nil, err
 	}
-	return &DownloadedFile{Name: name, Path: destPath}, nil
+	return &DownloadedFile{Name: filepath.Base(destPath), Path: destPath}, nil
 }
 
 func handleLinkAttachment(link *googleclassroom.Link, destDir string) (*DownloadedFile, error) {
@@ -465,4 +496,111 @@ func saveSkippedFile(att *googleclassroom.Attachment, reason error, destDir stri
 		return nil
 	}
 	return &DownloadedFile{Name: name, Path: destPath}
+}
+
+// uniquePath returns a destination path that doesn't already exist on disk.
+// If <destDir>/<name> is free it is returned as-is; otherwise it appends a
+// numeric suffix before the extension: "Task 1.txt", "Task 1_2.txt", etc.
+func uniquePath(destDir, name string) string {
+	candidate := filepath.Join(destDir, name)
+	if _, err := os.Stat(candidate); os.IsNotExist(err) {
+		return candidate
+	}
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	for i := 2; ; i++ {
+		candidate = filepath.Join(destDir, fmt.Sprintf("%s_%d%s", base, i, ext))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+}
+
+// downloadAndExtractDocx downloads a .docx file from Drive and extracts its
+// plain text by reading the word/document.xml entry inside the ZIP container.
+func downloadAndExtractDocx(ctx context.Context, svc *drive.Service, df *googleclassroom.DriveFile, destDir string) (*DownloadedFile, error) {
+	// Download the raw .docx bytes into memory.
+	var buf bytes.Buffer
+	err := withRetry(ctx, fmt.Sprintf("download docx %s", df.Title), func() error {
+		resp, e := svc.Files.Get(df.Id).Context(ctx).Download()
+		if e != nil {
+			return e
+		}
+		defer resp.Body.Close()
+		buf.Reset()
+		_, e = io.Copy(&buf, resp.Body)
+		return e
+	})
+	if err != nil {
+		return nil, fmt.Errorf("downloading docx %s: %w", df.Title, err)
+	}
+
+	// Open the ZIP archive that is the .docx container.
+	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		return nil, fmt.Errorf("opening docx zip for %s: %w", df.Title, err)
+	}
+
+	// Find and parse word/document.xml.
+	var text string
+	for _, f := range r.File {
+		if f.Name != "word/document.xml" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, fmt.Errorf("opening word/document.xml in %s: %w", df.Title, err)
+		}
+		text, err = extractDocxText(rc)
+		rc.Close()
+		if err != nil {
+			return nil, fmt.Errorf("extracting text from %s: %w", df.Title, err)
+		}
+		break
+	}
+
+	if text == "" {
+		log.Printf("[get_submissions]   WARN: no text extracted from docx %q", df.Title)
+	}
+
+	name := df.Title
+	if !strings.HasSuffix(strings.ToLower(name), ".docx") {
+		name += ".docx"
+	}
+	name += ".txt"
+	destPath := uniquePath(destDir, name)
+	if err := os.WriteFile(destPath, []byte(text), 0644); err != nil {
+		return nil, fmt.Errorf("writing docx text for %s: %w", df.Title, err)
+	}
+
+	log.Printf("[get_submissions]   extracted %d bytes from docx %s → %s", len(text), df.Title, filepath.Base(destPath))
+	return &DownloadedFile{Name: filepath.Base(destPath), Path: destPath}, nil
+}
+
+// extractDocxText walks the XML token stream of word/document.xml and
+// collects all character data, inserting newlines at paragraph boundaries.
+func extractDocxText(r io.Reader) (string, error) {
+	var sb strings.Builder
+	dec := xml.NewDecoder(r)
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			// w:p marks a paragraph — add a newline to separate them.
+			if t.Name.Local == "p" && t.Name.Space != "" {
+				if sb.Len() > 0 {
+					sb.WriteByte('\n')
+				}
+			}
+		case xml.CharData:
+			sb.Write(t)
+		}
+	}
+	return strings.TrimSpace(sb.String()), nil
 }
