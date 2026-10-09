@@ -338,9 +338,24 @@ func submissionFileFormats(sub classroom.Submission) []string {
 // fileFormatLabel maps a stored filename to a short display label.
 // Google Doc exports are stored as "<title>.txt"; PDFs as "<title>.pdf.txt";
 // docx as "<title>.docx.txt"; images as "<title>.png.txt" etc.
+// GitHub files use a ".github.<ext>" or ".diff.txt" convention.
 func fileFormatLabel(name string) string {
 	lower := strings.ToLower(name)
 	switch {
+	case strings.HasSuffix(lower, ".diff.txt"):
+		return "github diff"
+	case strings.Contains(lower, ".github."):
+		// Raw file fetched from GitHub blob URL: <title>.github.<ext>
+		// Extract the real extension for the label, e.g. ".github.sql" → "github:sql"
+		afterGH := lower[strings.LastIndex(lower, ".github.")+len(".github."):]
+		ext := strings.TrimSuffix(afterGH, filepath.Ext(afterGH))
+		if ext == "" {
+			ext = afterGH
+		}
+		if ext != "" {
+			return "github:" + ext
+		}
+		return "github"
 	case strings.HasSuffix(lower, ".pdf.txt"):
 		return "pdf"
 	case strings.HasSuffix(lower, ".docx.txt"):

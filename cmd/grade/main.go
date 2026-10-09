@@ -53,6 +53,7 @@ func main() {
 
 	studentsFlag := flag.String("students", "", "Comma-separated surnames to grade (empty = all students)")
 	skipFetchFlag := flag.Bool("skip-fetch", false, "Skip downloading submissions (use already-downloaded files)")
+	githubTokenFlag := flag.String("github-token", "", "GitHub personal access token for fetching private-repo submissions (overrides GITHUB_TOKEN env var)")
 	flag.Parse()
 
 	// ── Validate required flags ───────────────────────────────────────────────
@@ -115,6 +116,12 @@ func main() {
 	var submissions []classroom.Submission
 	var courseID string
 
+	// Resolve GitHub token: flag > env var.
+	githubToken := *githubTokenFlag
+	if githubToken == "" {
+		githubToken = os.Getenv("GITHUB_TOKEN")
+	}
+
 	if *skipFetchFlag {
 		log.Printf("[main] --skip-fetch: loading submissions from disk")
 		submissions, courseID, err = loadSubmissionsFromDisk(workspace, *classFlag, *assignmentFlag)
@@ -122,7 +129,7 @@ func main() {
 			log.Fatalf("loading submissions from disk: %v", err)
 		}
 	} else {
-		submissions, courseID, err = fetchSubmissions(ctx, workspace, *classFlag, *assignmentFlag, credsFile, tokenFile, *studentsFlag, visionClient)
+		submissions, courseID, err = fetchSubmissions(ctx, workspace, *classFlag, *assignmentFlag, credsFile, tokenFile, *studentsFlag, visionClient, githubToken)
 		if err != nil {
 			log.Fatalf("fetching submissions: %v", err)
 		}
@@ -165,7 +172,7 @@ func main() {
 
 // fetchSubmissions authenticates with Google Classroom and downloads submissions.
 // Returns the submissions and the resolved numeric course ID.
-func fetchSubmissions(ctx context.Context, workspace, className, assignmentName, credsFile, tokenFile, studentsCSV string, visionClient vision.Client) ([]classroom.Submission, string, error) {
+func fetchSubmissions(ctx context.Context, workspace, className, assignmentName, credsFile, tokenFile, studentsCSV string, visionClient vision.Client, githubToken string) ([]classroom.Submission, string, error) {
 	if _, err := os.Stat(credsFile); os.IsNotExist(err) {
 		return nil, "", fmt.Errorf("Google credentials.json file not found at %s.\nPlease download it from Google Cloud Console and place it at that path, or specify -credentials / GOOGLE_CREDENTIALS_FILE.", credsFile)
 	}
@@ -216,7 +223,7 @@ func fetchSubmissions(ctx context.Context, workspace, className, assignmentName,
 	filter := classroom.NewStudentFilter(splitCSV(studentsCSV))
 
 	log.Printf("[main] fetching submissions: course=%s (%s) assignment=%q", course.Name, course.ID, assignment.Title)
-	subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient, course.ID, course.Name, assignment.ID, assignment.Title, submissionsDir, filter, visionClient)
+	subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient, course.ID, course.Name, assignment.ID, assignment.Title, submissionsDir, filter, visionClient, githubToken)
 	return subs, course.Name, err
 }
 

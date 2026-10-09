@@ -213,6 +213,12 @@ input[type=file]::file-selector-button:hover{background:#3b3f5c}
     </div>
   </div>
   <div class="settings-row">
+    <label>GitHub Token <span class="badge">optional</span></label>
+    <input type="password" id="github-token-input" placeholder="ghp_… (for private repos)" autocomplete="off" style="flex:1;max-width:480px"/>
+    <button class="primary" onclick="saveGitHubToken()">Save</button>
+    <span class="hint" id="github-token-hint"></span>
+  </div>
+  <div class="settings-row">
     <label>Grading rules</label>
     <div id="settings-rules-status" style="color:#475569;font-size:.8rem">No rules cached</div>
   </div>
@@ -807,7 +813,14 @@ function renderTable(prefix, marks) {
     const whyNot12 = m.reason_not_12 && m.reason_not_12.toLowerCase() !== 'none'
       ? escHtml(m.reason_not_12) : '<span style="color:#475569">—</span>';
     const fileBadges = (m.submission_files || [])
-      .map(f => `<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:.68rem;background:#1e2235;border:1px solid #2d3148;color:#64748b;margin-right:3px">${escHtml(f)}</span>`)
+      .map(f => {
+        const isGH = f === 'github diff' || f.startsWith('github:');
+        const style = isGH
+          ? 'display:inline-block;padding:1px 6px;border-radius:8px;font-size:.68rem;background:#0d2b1a;border:1px solid #1a7f37;color:#3fb950;margin-right:3px'
+          : 'display:inline-block;padding:1px 6px;border-radius:8px;font-size:.68rem;background:#1e2235;border:1px solid #2d3148;color:#64748b;margin-right:3px';
+        const icon = isGH ? '⑂ ' : '';
+        return `<span style="${style}">${icon}${escHtml(f)}</span>`;
+      })
       .join('');
     html += `<tr>
       <td style="color:#475569">${i + 1}</td>
@@ -935,6 +948,17 @@ async function loadSettings() {
           hint.style.color = '#94a3b8';
         }
       }
+    }
+  } catch(e) { /* non-fatal */ }
+
+  // GitHub token — just show whether one is configured, never the value.
+  try {
+    const gh = await apiFetch('/api/github-token');
+    const ghInput = document.getElementById('github-token-input');
+    const ghHint = document.getElementById('github-token-hint');
+    if (ghInput && gh.configured) {
+      ghInput.placeholder = '••••••••••••••• (token active)';
+      if (ghHint) { ghHint.textContent = '✔ token set'; ghHint.style.color = '#34d399'; }
     }
   } catch(e) { /* non-fatal */ }
 
@@ -1232,6 +1256,38 @@ async function saveGeminiKeyFile() {
     const modelSel = document.getElementById('gemini-model-select');
     const currentModel = modelSel ? modelSel.value : '';
     await loadGeminiModels(currentModel);
+  } catch(e) {
+    hint.textContent = 'Error: ' + e.message;
+    hint.style.color = '#f87171';
+  }
+}
+
+async function saveGitHubToken() {
+  const input = document.getElementById('github-token-input');
+  const hint = document.getElementById('github-token-hint');
+  const token = input.value.trim();
+
+  hint.textContent = 'Saving…';
+  hint.style.color = '#94a3b8';
+  try {
+    const resp = await fetch('/api/github-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token })
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || resp.statusText);
+
+    if (result.configured) {
+      hint.textContent = '✔ token set';
+      hint.style.color = '#34d399';
+      input.value = '';
+      input.placeholder = '••••••••••••••• (token active)';
+    } else {
+      hint.textContent = 'Token cleared';
+      hint.style.color = '#94a3b8';
+      input.placeholder = 'ghp_… (for private repos)';
+    }
   } catch(e) {
     hint.textContent = 'Error: ' + e.message;
     hint.style.color = '#f87171';

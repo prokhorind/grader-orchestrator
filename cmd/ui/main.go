@@ -37,6 +37,7 @@ func main() {
 	geminiAPIKeyFlag := flag.String("gemini-api-key", "", "Google Gemini API key (overrides GEMINI_API_KEY env var and -gemini-key-file)")
 	geminiKeyFileFlag := flag.String("gemini-key-file", "", "Path to a file containing the Gemini API key (overrides GEMINI_KEY_FILE env var and the default ~/.config/classroom-grader/gemini-api-key)")
 	geminiModelFlag := flag.String("gemini-model", "", `Gemini model name (default "gemini-2.5-flash")`)
+	githubTokenFlag := flag.String("github-token", "", "GitHub personal access token for private-repo submissions (overrides GITHUB_TOKEN env var)")
 	portFlag := flag.Int("port", 8080, "HTTP port to listen on")
 	flag.Parse()
 
@@ -82,6 +83,12 @@ func main() {
 		}
 	}
 
+	// GitHub token: flag > GITHUB_TOKEN env var.
+	githubToken := *githubTokenFlag
+	if githubToken == "" {
+		githubToken = os.Getenv("GITHUB_TOKEN")
+	}
+
 	cfg := server.Config{
 		Workspace:           workspace,
 		CredsFile:           creds,
@@ -93,6 +100,7 @@ func main() {
 		GeminiAPIKey:        geminiAPIKey,
 		GeminiKeyFile:       geminiKeyFile,
 		GeminiModel:         *geminiModelFlag,
+		GitHubToken:         githubToken,
 	}
 
 	mux := server.New(cfg)

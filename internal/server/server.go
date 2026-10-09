@@ -37,6 +37,7 @@ type Config struct {
 	GeminiAPIKey        string
 	GeminiKeyFile       string // path to a plaintext file containing the API key
 	GeminiModel         string
+	GitHubToken         string // optional PAT for fetching private-repo submissions
 }
 
 // srv is the internal handler type that owns mutable state.
@@ -53,6 +54,7 @@ type srv struct {
 	geminiAPIKey        string // mutable — can be changed via /api/gemini-config
 	geminiKeyFile       string // mutable — path to plaintext key file, changeable via /api/gemini-key-file
 	geminiModel         string // mutable
+	githubToken         string // mutable — optional PAT, changeable via /api/github-token
 }
 
 // getWorkspace returns the current workspace path under a read lock.
@@ -86,6 +88,7 @@ func New(cfg Config) http.Handler {
 		geminiAPIKey:        cfg.GeminiAPIKey,
 		geminiKeyFile:       cfg.GeminiKeyFile,
 		geminiModel:         cfg.GeminiModel,
+		githubToken:         cfg.GitHubToken,
 	}
 
 	mux := http.NewServeMux()
@@ -111,6 +114,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("/api/gemini-config", s.handleGeminiConfig)
 	mux.HandleFunc("/api/gemini-models", s.handleGeminiModels)
 	mux.HandleFunc("/api/gemini-key-file", s.handleGeminiKeyFile)
+	mux.HandleFunc("/api/github-token", s.handleGitHubToken)
 	mux.HandleFunc("/api/courses", s.handleCourses)
 	mux.HandleFunc("/api/assignments", s.handleAssignments)
 	mux.HandleFunc("/api/students", s.handleStudents)
@@ -497,6 +501,47 @@ func (s *srv) handleGeminiKeyFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ── API: /api/github-token ────────────────────────────────────────────────────
+
+type githubTokenResponse struct {
+	// Configured is true when a non-empty token is set.
+	Configured bool `json:"configured"`
+}
+
+// handleGitHubToken handles GET (is a token set?) and POST (update token).
+// The token value is never echoed back in the GET response for security.
+func (s *srv) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		configured := s.githubToken != ""
+		s.mu.RUnlock()
+		jsonOK(w, githubTokenResponse{Configured: configured})
+
+	case http.MethodPost:
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		s.githubToken = strings.TrimSpace(req.Token)
+		s.mu.Unlock()
+		configured := strings.TrimSpace(req.Token) != ""
+		if configured {
+			log.Printf("[github-token] token configured")
+		} else {
+			log.Printf("[github-token] token cleared")
+		}
+		jsonOK(w, githubTokenResponse{Configured: configured})
+
+	default:
+		jsonError(w, "GET or POST required", http.StatusMethodNotAllowed)
+	}
+}
+
 // ── API: /api/courses ─────────────────────────────────────────────────────────
 
 func (s *srv) handleCourses(w http.ResponseWriter, r *http.Request) {
@@ -778,7 +823,7 @@ func (s *srv) handleGrade(w http.ResponseWriter, r *http.Request) {
 		submissionsDir := filepath.Join(workspace, "submissions")
 
 		subs, err := classroom.DownloadSubmissions(ctx, svc, httpClient,
-			req.CourseID, courseFolderName, req.AssignmentID, req.AssignmentTitle, submissionsDir, filter, visionClient)
+			req.CourseID, courseFolderName, req.AssignmentID, req.AssignmentTitle, submissionsDir, filter, visionClient, s.githubToken)
 		if err != nil {
 			send(errorEvent("download failed: " + err.Error()))
 			return

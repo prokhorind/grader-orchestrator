@@ -206,7 +206,7 @@ func limitedCopy(dst io.Writer, src io.Reader) (int64, error) {
 // visionClient is optional (pass nil to disable). When provided, PDFs and
 // images are sent to the vision model for text extraction instead of being
 // stored as raw binary files.
-func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, httpClient *http.Client, courseID, courseFolderName, courseWorkID, assignmentTitle, baseDir string, filter StudentFilter, visionClient vision.Client) ([]Submission, error) {
+func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, httpClient *http.Client, courseID, courseFolderName, courseWorkID, assignmentTitle, baseDir string, filter StudentFilter, visionClient vision.Client, githubToken string) ([]Submission, error) {
 	driveSvc, err := drive.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("creating drive service: %w", err)
@@ -255,7 +255,7 @@ func DownloadSubmissions(ctx context.Context, svc *googleclassroom.Service, http
 							df, err = handleDriveAttachment(ctx, driveSvc, att.DriveFile, versionDir, visionClient)
 						case att.Link != nil:
 							log.Printf("[get_submissions]   link: %s", att.Link.Url)
-							df, err = handleLinkAttachment(att.Link, versionDir)
+							df, err = handleLinkAttachment(att.Link, versionDir, githubToken)
 						}
 						if err != nil {
 							log.Printf("[get_submissions]   ERROR: %v", err)
@@ -586,18 +586,182 @@ func extractGoogleDocImages(ctx context.Context, svc *drive.Service, df *googlec
 	return parts
 }
 
-func handleLinkAttachment(link *googleclassroom.Link, destDir string) (*DownloadedFile, error) {
+// handleLinkAttachment processes a link attachment from a student submission.
+//
+// GitHub URLs are handled specially so the grader sees real code rather than
+// just a URL string.  Three patterns are recognised:
+//
+//   - /blob/<ref>/<path>  → fetch the raw file content
+//   - /compare/, /pull/, /commit/  → fetch the unified diff
+//   - anything else on github.com  → save URL as text (no guessing)
+//
+// Multiple GitHub links in one submission are fine: each call produces its own
+// file and uniquePath() handles any name collisions.
+func handleLinkAttachment(link *googleclassroom.Link, destDir string, githubToken string) (*DownloadedFile, error) {
 	title := link.Title
 	if title == "" {
 		title = "link"
 	}
-	name := Sanitize(title) + ".txt"
-	destPath := filepath.Join(destDir, name)
+
+	if isGitHubURL(link.Url) {
+		var df *DownloadedFile
+		var err error
+
+		switch {
+		case isGitHubBlobURL(link.Url):
+			// /blob/<ref>/<file> → fetch raw file content
+			df, err = fetchGitHubRawFile(link.Url, title, destDir, githubToken)
+		case isGitHubDiffURL(link.Url):
+			// compare / PR / commit → fetch unified diff
+			df, err = fetchGitHubDiff(link.Url, title, destDir, githubToken)
+		}
+
+		if err != nil {
+			// Fall back to saving the URL so we don't silently lose the submission.
+			log.Printf("[get_submissions]   WARN: could not fetch GitHub content for %s: %v — saving URL instead", link.Url, err)
+		} else if df != nil {
+			return df, nil
+		}
+	}
+
+	// Default: save URL as a plain text note.
+	destPath := uniquePath(destDir, Sanitize(title)+".txt")
 	content := fmt.Sprintf("Title: %s\nURL: %s\n", link.Title, link.Url)
 	if err := os.WriteFile(destPath, []byte(content), 0644); err != nil {
 		return nil, fmt.Errorf("saving link %s: %w", link.Url, err)
 	}
-	return &DownloadedFile{Name: name, Path: destPath}, nil
+	return &DownloadedFile{Name: filepath.Base(destPath), Path: destPath}, nil
+}
+
+// isGitHubURL returns true for any github.com URL.
+func isGitHubURL(rawURL string) bool {
+	return strings.Contains(strings.ToLower(rawURL), "github.com")
+}
+
+// isGitHubBlobURL returns true for links of the form
+// github.com/<owner>/<repo>/blob/<ref>/<path>.
+func isGitHubBlobURL(rawURL string) bool {
+	return strings.Contains(strings.ToLower(rawURL), "/blob/")
+}
+
+// isGitHubDiffURL returns true when the URL points to a resource for which
+// GitHub can return a unified diff: compare pages, pull requests, or commits.
+func isGitHubDiffURL(rawURL string) bool {
+	u := strings.ToLower(rawURL)
+	return strings.Contains(u, "/compare/") ||
+		strings.Contains(u, "/pull/") ||
+		strings.Contains(u, "/commit/")
+}
+
+// fetchGitHubRawFile converts a github.com /blob/ URL to its raw.githubusercontent.com
+// equivalent and downloads the file content, preserving the original extension.
+//
+// Example:
+//
+//	https://github.com/user/repo/blob/main/task1.sql
+//	→ https://raw.githubusercontent.com/user/repo/main/task1.sql
+func fetchGitHubRawFile(rawURL, title, destDir, githubToken string) (*DownloadedFile, error) {
+	// Convert blob URL → raw URL.
+	// github.com/<owner>/<repo>/blob/<ref>/<path...>
+	// → raw.githubusercontent.com/<owner>/<repo>/<ref>/<path...>
+	rawFileURL := strings.Replace(rawURL, "github.com", "raw.githubusercontent.com", 1)
+	rawFileURL = strings.Replace(rawFileURL, "/blob/", "/", 1)
+	// Strip any fragment (#L42 line anchors are common on blob links).
+	if idx := strings.Index(rawFileURL, "#"); idx != -1 {
+		rawFileURL = rawFileURL[:idx]
+	}
+
+	data, err := githubGet(rawFileURL, githubToken)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty file at %s", rawFileURL)
+	}
+
+	// Preserve the original file extension so the grader knows what language it is.
+	// Use a .github.<ext> naming convention so the results table can show a
+	// GitHub badge for this file.
+	origExt := filepath.Ext(rawURL)
+	if idx := strings.Index(origExt, "#"); idx != -1 {
+		origExt = origExt[:idx] // strip fragment from extension too
+	}
+	var destPath string
+	if origExt != "" {
+		destPath = uniquePath(destDir, Sanitize(title)+".github"+origExt)
+	} else {
+		destPath = uniquePath(destDir, Sanitize(title)+".github.txt")
+	}
+
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return nil, fmt.Errorf("writing raw file: %w", err)
+	}
+	log.Printf("[get_submissions]   github raw file: %d bytes from %s → %s", len(data), rawFileURL, filepath.Base(destPath))
+	return &DownloadedFile{Name: filepath.Base(destPath), Path: destPath}, nil
+}
+
+// fetchGitHubDiff downloads a unified diff for a GitHub compare, PR, or
+// commit URL and saves it as a .diff.txt file.
+func fetchGitHubDiff(rawURL, title, destDir, githubToken string) (*DownloadedFile, error) {
+	diffURL := rawURL
+	// Strip fragment before appending suffix.
+	if idx := strings.Index(diffURL, "#"); idx != -1 {
+		diffURL = diffURL[:idx]
+	}
+	diffURL = strings.TrimRight(diffURL, "/")
+	if !strings.HasSuffix(diffURL, ".diff") && !strings.HasSuffix(diffURL, ".patch") {
+		diffURL += ".diff"
+	}
+
+	data, err := githubGet(diffURL, githubToken)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty diff from %s — nothing was changed", diffURL)
+	}
+
+	destPath := uniquePath(destDir, Sanitize(title)+".diff.txt")
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return nil, fmt.Errorf("writing diff file: %w", err)
+	}
+	log.Printf("[get_submissions]   github diff: %d bytes from %s → %s", len(data), diffURL, filepath.Base(destPath))
+	return &DownloadedFile{Name: filepath.Base(destPath), Path: destPath}, nil
+}
+
+// githubGet performs a GET request to a GitHub URL with an optional Bearer
+// token and returns the response body (capped at maxDownloadBytes).
+func githubGet(url, githubToken string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building request for %s: %w", url, err)
+	}
+	req.Header.Set("Accept", "text/plain, */*")
+	if githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+githubToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("GitHub returned 404 for %s — repo may be private or URL is invalid", url)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub returned HTTP %d for %s", resp.StatusCode, url)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("reading response from %s: %w", url, err)
+	}
+	return data, nil
 }
 
 func saveTextSubmission(filename, content, destDir string) (*DownloadedFile, error) {
